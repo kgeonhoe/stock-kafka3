@@ -1,0 +1,16 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ./requirements-kafka.txt /requirements.txt
+RUN pip install --no-cache-dir -r /requirements.txt
+
+# Python 경로 설정
+ENV PYTHONPATH=/app:/app/common:/app/config
+
+CMD ["python", "-u", "/app/kafka/realtime_producer.py"]

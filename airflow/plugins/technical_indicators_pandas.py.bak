@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+import pandas as pd
+import numpy as np
+from typing import Dict, Any, List, Optional
+
+# 프로젝트 경로 추가
+sys.path.insert(0, '/opt/airflow')
+
+from common.database import DuckDBManager
+
+class TechnicalIndicators:
+    """기술적 지표 계산 클래스 (Pandas 기반)"""
+    
+    def __init__(self, db_path: str = "/data/duckdb/stock_data.db"):
+        """
+        기술적 지표 계산 클래스 초기화
+        
+        Args:
+            db_path: DuckDB 파일 경로
+        """
+        self.db = DuckDBManager(db_path)
+        self.spark = self._create_spark_session()
+    
+    def _create_spark_session(self) -> SparkSession:
+        """
+        스파크 세션 생성
+        
+        Returns:
+            SparkSession 인스턴스
+        """
+        return (SparkSession.builder
+                .appName("StockTechnicalIndicators")
+                .config("spark.driver.memory", "2g")
+                .config("spark.executor.memory", "2g")
+                .getOrCreate())
+    
+    def load_stock_data(self, symbol: Optional[str] = None) -> pd.DataFrame:
+        """
+        주가 데이터 로드
+        
+        Args:
+            symbol: 종목 심볼 (None이면 모든 종목)
+            
+        Returns:
+            주가 데이터 DataFrame
+        """
+        if symbol:
+            query = f"""
+                SELECT * FROM stock_data
+                WHERE symbol = '{symbol}'
+                ORDER BY date
+            """
+        else:
+            query = """
+                SELECT * FROM stock_data
+                ORDER BY symbol, date
+            """
+        
+        result = self.db.conn.execute(query).fetchall()
+        columns = ["symbol", "date", "open", "high", "low", "close", "volume"]
+        df = pd.DataFrame(result, columns=columns)
+        
+        return df
+    
+    def calculate_indicators(self, symbol: Optional[str] = None):
+        """
+        기술적 지표 계산 및 저장
+        
+        Args:
+            symbol: 종목 심볼 (None이면 모든 종목)
+        """
+        # 주가 데이터 로드
+        stock_data = self.load_stock_data(symbol)
+        
+        if stock_data.empty:
+            print(f"⚠️ {'모든 종목' if symbol is None else symbol}의 주가 데이터가 없습니다.")
+            return
+        
+        print(f"🔍 {'모든 종목' if symbol is None else symbol}의 기술적 지표 계산 시작")
+        
+        # 스파크 데이터프레임으로 변환
+        spark_df = self.spark.createDataFrame(stock_data)
+        
+        # 종목별 윈도우 정의
+        window_spec = Window.partitionBy("symbol").orderBy("date")
+        
+        # 1. 이동평균선 (SMA)
+        for period in [5, 20, 60, 112, 224, 448]:
+            window_avg = Window.partitionBy("symbol").orderBy("date").rowsBetween(-(period-1), 0)
+            spark_df = spark_df.withColumn(f"sma_{period}", avg("close").over(window_avg))
+        
+        # 2. 지수이동평균 (EMA)
+        # SMA로 초기값 설정 후 직접 계산
+        for period in [5, 20, 60]:
+            spark_df = self._calculate_ema(spark_df, period)
+        
+        # 3. 볼린저 밴드 (기준: 20일 이동평균, 표준편차 2)
+        window_std = Window.partitionBy("symbol").orderBy("date").rowsBetween(-19, 0)
+        spark_df = spark_df.withColumn("bb_middle", col("sma_20"))
+        spark_df = spark_df.withColumn("bb_std", stddev("close").over(window_std))
+        spark_df = spark_df.withColumn("bb_upper", col("bb_middle") + (col("bb_std") * 2))
+        spark_df = spark_df.withColumn("bb_lower", col("bb_middle") - (col("bb_std") * 2))
+        
+        # 4. MACD (12일 EMA, 26일 EMA, 9일 신호선)
+        spark_df = self._calculate_ema(spark_df, 12, "ema_12")
+        spark_df = self._calculate_ema(spark_df, 26, "ema_26")
+        spark_df = spark_df.withColumn("macd", col("ema_12") - col("ema_26"))
+        
+        # MACD 신호선 (9일 EMA)
+        window_signal = Window.partitionBy("symbol").orderBy("date")
+        spark_df = spark_df.withColumn("macd_signal", 
+                                       expr("avg(macd) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 8 PRECEDING AND CURRENT ROW)"))
+        spark_df = spark_df.withColumn("macd_histogram", col("macd") - col("macd_signal"))
+        
+        # 5. RSI (14일)
+        spark_df = self._calculate_rsi(spark_df, 14)
+        
+        # 6. CCI (상품채널지수, 20일)
+        spark_df = self._calculate_cci(spark_df, 20)
+        
+        # 7. OBV (On Balance Volume)
+        spark_df = self._calculate_obv(spark_df)
+        
+        # 필요한 열만 선택하여 최종 결과 생성
+        result_df = spark_df.select(
+            "symbol", "date", 
+            "bb_upper", "bb_middle", "bb_lower",
+            "macd", "macd_signal", "macd_histogram",
+            "rsi",
+            "sma_5", "sma_20", "sma_60",
+            "ema_5", "ema_20", "ema_60",
+            "cci", "obv",
+            col("sma_112").alias("ma_112"),
+            col("sma_224").alias("ma_224"),
+            col("sma_448").alias("ma_448")
+        )
+        
+        # 결과를 판다스 데이터프레임으로 변환하여 DuckDB에 저장
+        pandas_df = result_df.toPandas()
+        
+        # NaN 값을 None으로 변환
+        pandas_df = pandas_df.where(pd.notnull(pandas_df), None)
+        
+        # DuckDB에 저장
+        saved_count = 0
+        for _, row in pandas_df.iterrows():
+            try:
+                self.db.save_technical_indicators(row.to_dict())
+                saved_count += 1
+            except Exception as e:
+                print(f"❌ 기술적 지표 저장 오류: {e}")
+        
+        print(f"✅ 기술적 지표 {saved_count}개 저장 완료")
+    
+    def _calculate_ema(self, df, period, col_name=None):
+        """
+        지수이동평균 계산
+        
+        Args:
+            df: 스파크 데이터프레임
+            period: 기간
+            col_name: 결과 열 이름
+            
+        Returns:
+            EMA 열이 추가된 데이터프레임
+        """
+        if col_name is None:
+            col_name = f"ema_{period}"
+            
+        # 초기값으로 SMA 사용
+        window_avg = Window.partitionBy("symbol").orderBy("date").rowsBetween(-(period-1), 0)
+        df = df.withColumn(f"{col_name}_init", avg("close").over(window_avg))
+        
+        # 가중치 계산
+        alpha = 2.0 / (period + 1.0)
+        
+        # EMA 계산
+        return df.withColumn(col_name, 
+                             when(col("close").isNull(), None)
+                             .otherwise(expr(f"""
+                                 CASE 
+                                     WHEN {col_name}_init IS NULL THEN NULL
+                                     ELSE {col_name}_init * (1 - {alpha}) + close * {alpha} 
+                                 END
+                             """)))
+    
+    def _calculate_rsi(self, df, period=14):
+        """
+        RSI(Relative Strength Index) 계산
+        
+        Args:
+            df: 스파크 데이터프레임
+            period: 기간
+            
+        Returns:
+            RSI 열이 추가된 데이터프레임
+        """
+        # 전일 종가 계산
+        window_lag = Window.partitionBy("symbol").orderBy("date")
+        df = df.withColumn("prev_close", lag("close", 1).over(window_lag))
+        
+        # 상승폭과 하락폭 계산
+        df = df.withColumn("price_diff", col("close") - col("prev_close"))
+        df = df.withColumn("gain", when(col("price_diff") > 0, col("price_diff")).otherwise(0))
+        df = df.withColumn("loss", when(col("price_diff") < 0, -col("price_diff")).otherwise(0))
+        
+        # 이동평균 계산
+        window_avg = Window.partitionBy("symbol").orderBy("date").rowsBetween(-(period-1), 0)
+        df = df.withColumn("avg_gain", avg("gain").over(window_avg))
+        df = df.withColumn("avg_loss", avg("loss").over(window_avg))
+        
+        # RSI 계산
+        df = df.withColumn("rs", col("avg_gain") / col("avg_loss"))
+        df = df.withColumn("rsi", 100 - (100 / (1 + col("rs"))))
+        
+        return df
+    
+    def _calculate_cci(self, df, period=20):
+        """
+        CCI(Commodity Channel Index) 계산
+        
+        Args:
+            df: 스파크 데이터프레임
+            period: 기간
+            
+        Returns:
+            CCI 열이 추가된 데이터프레임
+        """
+        # 전형적 가격 계산 (고가 + 저가 + 종가) / 3
+        df = df.withColumn("typical_price", (col("high") + col("low") + col("close")) / 3)
+        
+        # 이동평균 계산
+        window_avg = Window.partitionBy("symbol").orderBy("date").rowsBetween(-(period-1), 0)
+        df = df.withColumn("tp_sma", avg("typical_price").over(window_avg))
+        
+        # 편차의 절대값 평균 계산
+        df = df.withColumn("mean_deviation", 
+                           expr(f"avg(abs(typical_price - tp_sma)) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN {-(period-1)} PRECEDING AND CURRENT ROW)"))
+        
+        # CCI 계산 (0.015는 상수)
+        df = df.withColumn("cci", (col("typical_price") - col("tp_sma")) / (0.015 * col("mean_deviation")))
+        
+        return df
+    
+    def _calculate_obv(self, df):
+        """
+        OBV(On Balance Volume) 계산
+        
+        Args:
+            df: 스파크 데이터프레임
+            
+        Returns:
+            OBV 열이 추가된 데이터프레임
+        """
+        # 전일 종가 계산
+        window = Window.partitionBy("symbol").orderBy("date")
+        df = df.withColumn("prev_close", lag("close", 1).over(window))
+        
+        # OBV 계산 규칙
+        df = df.withColumn("obv_value", 
+                           when(col("close") > col("prev_close"), col("volume"))
+                           .when(col("close") < col("prev_close"), -col("volume"))
+                           .otherwise(0))
+        
+        # 누적합 계산
+        df = df.withColumn("obv", sum("obv_value").over(window))
+        
+        return df
+    
+    def close(self):
+        """리소스 정리"""
+        self.db.close()
+        self.spark.stop()
+
+# 에어플로우에서 호출하는 함수
+def calculate_technical_indicators_task(**kwargs):
+    """
+    에어플로우 태스크 함수: 기술적 지표 계산
+    
+    Args:
+        **kwargs: 에어플로우 컨텍스트
+        
+    Returns:
+        성공 여부
+    """
+    indicators = TechnicalIndicators()
+    
+    try:
+        # 모든 종목에 대해 기술적 지표 계산
+        indicators.calculate_indicators()
+        indicators.close()
+        return True
+    
+    except Exception as e:
+        indicators.close()
+        print(f"❌ 기술적 지표 계산 오류: {e}")
+        return False

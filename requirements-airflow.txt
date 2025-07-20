@@ -1,0 +1,25 @@
+# Apache Airflow Providers (constraints 파일과 호환되도록 버전 제거)
+apache-airflow-providers-postgres
+apache-airflow-providers-redis  
+apache-airflow-providers-http
+apache-airflow-providers-apache-spark
+
+# Database and data processing (버전 제한 완화)
+duckdb>=0.9.0
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+# API clients
+requests>=2.31.0
+
+# Kafka
+kafka-python>=2.0.0
+
+# Financial data
+yfinance>=0.2.0
+
+# 기타 필수 라이브러리  
+python-dotenv>=1.0.0
+
+# yfinance 관련 (최소 버전만 지정)
+yfinance>=0.2.0
