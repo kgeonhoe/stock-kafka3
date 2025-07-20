@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+import pandas as pd
+import numpy as np
+from typing import Dict, Any, List, Optional
+
+# 프로젝트 경로 추가
+sys.path.insert(0, '/opt/airflow')
+
+from common.database import DuckDBManager
+
+class TechnicalIndicators:
+    """기술적 지표 계산 클래스 (Pandas 기반)"""
+    
+    def __init__(self, db_path: str = "/data/duckdb/stock_data.db"):
+        """
+        기술적 지표 계산 클래스 초기화
+        
+        Args:
+            db_path: DuckDB 파일 경로
+        """
+        self.db = DuckDBManager(db_path)
+    
+    def calculate_bollinger_bands(self, symbol: str, period: int = 20, std_dev: float = 2.0) -> pd.DataFrame:
+        """
+        볼린저 밴드 계산
+        
+        Args:
+            symbol: 종목 심볼
+            period: 이동평균 기간 (기본 20일)
+            std_dev: 표준편차 배수 (기본 2.0)
+        """
+        # 주가 데이터 조회
+        query = """
+        SELECT symbol, date, close
+        FROM stock_data 
+        WHERE symbol = ?
+        ORDER BY date
+        """
+        
+        df = pd.read_sql_query(query, self.db.conn, params=[symbol])
+        
+        if df.empty:
+            return df
+        
+        # 볼린저 밴드 계산
+        df['bb_middle'] = df['close'].rolling(window=period).mean()
+        df['bb_std'] = df['close'].rolling(window=period).std()
+        df['bb_upper'] = df['bb_middle'] + (df['bb_std'] * std_dev)
+        df['bb_lower'] = df['bb_middle'] - (df['bb_std'] * std_dev)
+        
+        return df
+    
+    def calculate_rsi(self, symbol: str, period: int = 14) -> pd.DataFrame:
+        """
+        RSI (Relative Strength Index) 계산
+        
+        Args:
+            symbol: 종목 심볼
+            period: RSI 계산 기간 (기본 14일)
+        """
+        # 주가 데이터 조회
+        query = """
+        SELECT symbol, date, close
+        FROM stock_data 
+        WHERE symbol = ?
+        ORDER BY date
+        """
+        
+        df = pd.read_sql_query(query, self.db.conn, params=[symbol])
+        
+        if df.empty:
+            return df
+        
+        # 가격 변화 계산
+        df['price_change'] = df['close'].diff()
+        df['gain'] = df['price_change'].where(df['price_change'] > 0, 0)
+        df['loss'] = (-df['price_change']).where(df['price_change'] < 0, 0)
+        
+        # 평균 상승/하락 계산
+        df['avg_gain'] = df['gain'].rolling(window=period).mean()
+        df['avg_loss'] = df['loss'].rolling(window=period).mean()
+        
+        # RSI 계산
+        df['rs'] = df['avg_gain'] / df['avg_loss']
+        df['rsi'] = 100 - (100 / (1 + df['rs']))
+        
+        return df
+    
+    def calculate_macd(self, symbol: str, fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> pd.DataFrame:
+        """
+        MACD 계산
+        
+        Args:
+            symbol: 종목 심볼
+            fast_period: 빠른 EMA 기간 (기본 12일)
+            slow_period: 느린 EMA 기간 (기본 26일)
+            signal_period: 시그널 라인 기간 (기본 9일)
+        """
+        # 주가 데이터 조회
+        query = """
+        SELECT symbol, date, close
+        FROM stock_data 
+        WHERE symbol = ?
+        ORDER BY date
+        """
+        
+        df = pd.read_sql_query(query, self.db.conn, params=[symbol])
+        
+        if df.empty:
+            return df
+        
+        # EMA 계산
+        df['ema_fast'] = df['close'].ewm(span=fast_period).mean()
+        df['ema_slow'] = df['close'].ewm(span=slow_period).mean()
+        
+        # MACD 계산
+        df['macd'] = df['ema_fast'] - df['ema_slow']
+        df['macd_signal'] = df['macd'].ewm(span=signal_period).mean()
+        df['macd_histogram'] = df['macd'] - df['macd_signal']
+        
+        return df
+    
+    def calculate_moving_averages(self, symbol: str, periods: List[int] = [5, 20, 60]) -> pd.DataFrame:
+        """
+        이동평균 계산
+        
+        Args:
+            symbol: 종목 심볼
+            periods: 이동평균 기간 리스트
+        """
+        # 주가 데이터 조회
+        query = """
+        SELECT symbol, date, close
+        FROM stock_data 
+        WHERE symbol = ?
+        ORDER BY date
+        """
+        
+        df = pd.read_sql_query(query, self.db.conn, params=[symbol])
+        
+        if df.empty:
+            return df
+        
+        # SMA 계산
+        for period in periods:
+            df[f'sma_{period}'] = df['close'].rolling(window=period).mean()
+            df[f'ema_{period}'] = df['close'].ewm(span=period).mean()
+        
+        return df
+    
+    def calculate_all_indicators(self, symbol: str) -> Dict[str, Any]:
+        """
+        모든 기술적 지표 계산
+        
+        Args:
+            symbol: 종목 심볼
+            
+        Returns:
+            계산된 지표들의 딕셔너리
+        """
+        try:
+            # 기본 주가 데이터 조회
+            query = """
+            SELECT symbol, date, open, high, low, close, volume
+            FROM stock_data 
+            WHERE symbol = ?
+            ORDER BY date
+            """
+            
+            df = pd.read_sql_query(query, self.db.conn, params=[symbol])
+            
+            if df.empty:
+                return {}
+            
+            # 볼린저 밴드
+            bb_data = self.calculate_bollinger_bands(symbol)
+            if not bb_data.empty:
+                df = df.merge(bb_data[['date', 'bb_upper', 'bb_middle', 'bb_lower']], on='date', how='left')
+            
+            # RSI
+            rsi_data = self.calculate_rsi(symbol)
+            if not rsi_data.empty:
+                df = df.merge(rsi_data[['date', 'rsi']], on='date', how='left')
+            
+            # MACD
+            macd_data = self.calculate_macd(symbol)
+            if not macd_data.empty:
+                df = df.merge(macd_data[['date', 'macd', 'macd_signal', 'macd_histogram']], on='date', how='left')
+            
+            # 이동평균
+            ma_data = self.calculate_moving_averages(symbol)
+            if not ma_data.empty:
+                ma_cols = [col for col in ma_data.columns if col.startswith(('sma_', 'ema_'))]
+                df = df.merge(ma_data[['date'] + ma_cols], on='date', how='left')
+            
+            # 최신 데이터만 반환 (기술적 지표가 계산된 데이터)
+            result = df.dropna().tail(1).to_dict('records')
+            
+            return result[0] if result else {}
+            
+        except Exception as e:
+            print(f"❌ 기술적 지표 계산 실패 ({symbol}): {str(e)}")
+            return {}
+    
+    def save_indicators_to_db(self, symbol: str) -> bool:
+        """
+        계산된 기술적 지표를 데이터베이스에 저장
+        
+        Args:
+            symbol: 종목 심볼
+            
+        Returns:
+            저장 성공 여부
+        """
+        try:
+            indicators = self.calculate_all_indicators(symbol)
+            
+            if not indicators:
+                return False
+            
+            # 데이터베이스에 저장
+            self.db.save_technical_indicators(indicators)
+            self.db.conn.commit()
+            
+            print(f"✅ {symbol} 기술적 지표 저장 완료")
+            return True
+            
+        except Exception as e:
+            print(f"❌ {symbol} 기술적 지표 저장 실패: {str(e)}")
+            return False
+    
+    def batch_calculate_indicators(self, symbols: List[str] = None) -> Dict[str, bool]:
+        """
+        여러 종목의 기술적 지표를 일괄 계산
+        
+        Args:
+            symbols: 종목 심볼 리스트 (None이면 전체 종목)
+            
+        Returns:
+            종목별 처리 결과
+        """
+        if symbols is None:
+            symbols = self.db.get_active_symbols()
+        
+        results = {}
+        
+        for symbol in symbols:
+            try:
+                results[symbol] = self.save_indicators_to_db(symbol)
+            except Exception as e:
+                print(f"❌ {symbol} 처리 중 오류: {str(e)}")
+                results[symbol] = False
+        
+        success_count = sum(1 for success in results.values() if success)
+        total_count = len(results)
+        
+        print(f"📊 기술적 지표 계산 완료: {success_count}/{total_count} 종목 성공")
+        
+        return results
+    
+    def close(self):
+        """데이터베이스 연결 종료"""
+        self.db.close()
+
+# Airflow 플러그인으로 사용할 때 필요한 함수들
+def calculate_technical_indicators_task(symbol: str, **context):
+    """Airflow 태스크용 기술적 지표 계산 함수"""
+    ti = TechnicalIndicators()
+    try:
+        result = ti.save_indicators_to_db(symbol)
+        return f"{'✅ 성공' if result else '❌ 실패'}: {symbol}"
+    finally:
+        ti.close()
+
+def batch_calculate_indicators_task(**context):
+    """Airflow 태스크용 일괄 기술적 지표 계산 함수"""
+    ti = TechnicalIndicators()
+    try:
+        results = ti.batch_calculate_indicators()
+        success_count = sum(1 for success in results.values() if success)
+        total_count = len(results)
+        
+        context['task_instance'].xcom_push(key='success_count', value=success_count)
+        context['task_instance'].xcom_push(key='total_count', value=total_count)
+        
+        return f"기술적 지표 계산 완료: {success_count}/{total_count} 종목 성공"
+    finally:
+        ti.close()

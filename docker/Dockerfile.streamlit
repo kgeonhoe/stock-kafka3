@@ -1,0 +1,21 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ./requirements-streamlit.txt /requirements.txt
+RUN pip install --no-cache-dir -r /requirements.txt
+
+# Python 경로 설정
+ENV PYTHONPATH=/app:/app/common:/app/config
+
+RUN mkdir -p ~/.streamlit
+RUN echo "[server]\nheadless = true\nenableCORS = false\n" > ~/.streamlit/config.toml
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "/app/app.py"]

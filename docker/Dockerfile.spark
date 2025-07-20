@@ -1,0 +1,20 @@
+FROM bitnami/spark:3.5
+
+USER root
+
+# 빌드 도구 설치
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ./requirements-spark.txt /requirements.txt
+RUN pip install --no-cache-dir -r /requirements.txt
+
+# Python 경로 설정
+ENV PYTHONPATH=/app:/app/common:/app/config
+
+# spark 사용자로 변경하지 않고 root로 실행
+# USER spark
+
+CMD ["spark-submit", "--master", "spark://spark-master:7077", "/app/kafka/realtime_consumer.py"]
