@@ -304,7 +304,6 @@ services:
       context: ..
       dockerfile: ./docker/Dockerfile.spark
     container_name: kafka-consumer
-    user: root
     depends_on:
       - spark-master
       - kafka
@@ -323,7 +322,17 @@ services:
       - ../common:/app/common
       - ../config:/app/config
       - ../data:/data
-    command: spark-submit --master spark://spark-master:7077 /app/kafka/realtime_consumer.py
+    command: >
+      sh -c "
+        echo 'Spark 및 Kafka 연결 대기 중...' &&
+        sleep 20 &&
+        echo 'Checkpoints 디렉토리 생성...' &&
+        mkdir -p /data/checkpoints &&
+        echo 'Python 파일 확인...' &&
+        ls -la /app/kafka/ &&
+        echo 'PySpark Kafka Consumer 시작...' &&
+        spark-submit --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 --conf spark.jars.ivy=/tmp/.ivy2 --driver-memory 1g --executor-memory 1g /app/kafka/realtime_consumer.py
+      "
     restart: unless-stopped
 
   # Streamlit Dashboard
