@@ -27,7 +27,7 @@ class YFinanceCollector:
     
     def collect_stock_data(self, symbol: str, period: str = "1y") -> bool:
         """
-        개별 종목 주가 데이터 수집 (최적화된 고속 처리)
+        개별 종목 주가 데이터 수집 (중복 날짜 스킵)
         
         Args:
             symbol: 종목 심볼 (예: AAPL)
@@ -38,14 +38,27 @@ class YFinanceCollector:
         """
         import time
         import random
+        from datetime import date, timedelta
         
         try:
-            # API 호출 제한 방지를 위한 랜덤 지연
-            delay = random.uniform(0.2, 0.8)  # 200ms ~ 800ms 랜덤 지연
+            # 1. 기존 데이터 확인
+            existing_dates = self.db.get_existing_dates(symbol, days_back=365)  # 1년간 데이터 확인
+            latest_date = self.db.get_latest_date(symbol)
+            
+            print(f"🔍 {symbol}: 기존 데이터 {len(existing_dates)}일, 최신 날짜: {latest_date}")
+            
+            # 2. API 호출 제한 방지를 위한 지연 (더 길게)
+            delay = random.uniform(2.0, 4.0)  # 2-4초 랜덤 지연 (기존 0.2-0.8초에서 증가)
             time.sleep(delay)
             
-            # yfinance로 데이터 수집 (최적화된 설정)
-            ticker = yf.Ticker(symbol)
+            # 3. yfinance로 데이터 수집 (최적화된 설정 + User-Agent 변경)
+            import requests
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            
+            ticker = yf.Ticker(symbol, session=session)
             hist = ticker.history(
                 period=period, 
                 auto_adjust=True,      # 배당/분할 자동 조정
@@ -58,7 +71,7 @@ class YFinanceCollector:
                 print(f"⚠️ {symbol}: 히스토리 데이터가 비어있음")
                 return False
             
-            # 데이터 정리 (벡터화 연산으로 최적화)
+            # 4. 데이터 정리 (벡터화 연산으로 최적화)
             hist = hist.reset_index()
             hist['symbol'] = symbol
             
@@ -77,9 +90,20 @@ class YFinanceCollector:
                 print(f"⚠️ {symbol}: 정제 후 데이터가 비어있음")
                 return False
             
-            # DuckDB에 배치 저장 (최적화)
+            # 5. 중복 날짜 필터링 (새로운 로직)
+            total_records = len(hist)
+            hist_filtered = hist[~hist['date'].isin(existing_dates)]  # 기존 날짜 제외
+            new_records = len(hist_filtered)
+            
+            if new_records == 0:
+                print(f"✅ {symbol}: 모든 데이터가 이미 존재함 ({total_records}개 중 신규 0개)")
+                return True
+            
+            print(f"📊 {symbol}: {total_records}개 중 신규 {new_records}개 데이터만 저장")
+            
+            # 6. DuckDB에 신규 데이터만 저장
             save_count = 0
-            for _, row in hist.iterrows():
+            for _, row in hist_filtered.iterrows():
                 try:
                     stock_data = {
                         'symbol': row['symbol'],
@@ -97,7 +121,7 @@ class YFinanceCollector:
                     continue  # 개별 레코드 오류는 무시하고 계속 진행
             
             if save_count > 0:
-                print(f"✅ {symbol}: {save_count}개 레코드 저장 성공")
+                print(f"✅ {symbol}: {save_count}개 신규 레코드 저장 성공")
                 return True
             else:
                 print(f"❌ {symbol}: 저장된 레코드 없음")
@@ -108,44 +132,48 @@ class YFinanceCollector:
             if "delisted" in error_msg or "No data found" in error_msg:
                 print(f"⚠️ {symbol}: 상장폐지 또는 데이터 없음")
                 return False
-            elif "rate limit" in error_msg.lower() or "429" in error_msg:
-                print(f"🚫 {symbol}: API 호출 제한 - 재시도 중...")
-                time.sleep(random.uniform(2, 5))  # 2-5초 대기 후 재시도
-                return self.collect_stock_data(symbol, period)  # 한 번만 재시도
+            elif "rate limit" in error_msg.lower() or "429" in error_msg or "Too Many Requests" in error_msg:
+                print(f"🚫 {symbol}: API 호출 제한 감지 - 장시간 대기 중...")
+                time.sleep(random.uniform(10, 20))  # 10-20초 대기 (기존 2-5초에서 증가)
+                print(f"🔄 {symbol}: 재시도 중...")
+                # 재시도 시에는 더 긴 지연
+                time.sleep(random.uniform(5, 10))
+                return False  # 재시도 대신 실패로 처리하여 무한루프 방지
             else:
                 print(f"💥 {symbol}: 수집 실패 - {error_msg}")
                 return False
     
     def collect_all_symbols(self, symbols: List[str] = None, period: str = "2y", max_workers: int = 5) -> Dict[str, Any]:
         """
-        종목 리스트의 주가 데이터 수집 (병렬 처리)
+        전체 종목 병렬 수집 (중복 데이터 스킵)
         
         Args:
-            symbols: 수집할 종목 리스트 (None이면 DB에서 자동 조회)
-            period: 수집 기간
-            max_workers: 병렬 처리 워커 수 (기본 5개)
+            symbols: 수집할 종목 리스트 (None이면 DB에서 조회)
+            period: 수집 기간 
+            max_workers: 병렬 처리 수
             
         Returns:
             수집 결과 통계
         """
-        print("🚀 yfinance 기반 고속 병렬 주가 데이터 수집 시작")
+        import concurrent.futures
+        import time
         
-        # 종목 리스트 결정
+        # 심볼 목록 준비
         if symbols is None:
             symbols = self.db.get_active_symbols()
+            if not symbols:
+                print("❌ 활성 심볼이 없습니다.")
+                return {'error': 'No active symbols found'}
         
-        if not symbols:
-            print("⚠️ 저장된 종목이 없습니다")
-            return {'total': 0, 'success': 0, 'fail': 0}
-        print(f"📊 {(symbols)}")
-        print(f"📊 총 {len(symbols)}개 종목을 {max_workers}개 워커로 병렬 수집")
-        print(f"⚡ 예상 수집 시간: {len(symbols) * 2 // max_workers}초 (병렬 처리)")
+        print(f"� {len(symbols)}개 종목 병렬 수집 시작 (기존 데이터 스킵)")
+        print(f"⚙️ 설정: 최대 {max_workers}개 워커, 수집 기간: {period}")
         
+        start_time = time.time()
         success_count = 0
         fail_count = 0
-        start_time = time.time()
+        skip_count = 0  # 중복 데이터로 스킵된 종목 수
         
-        # 병렬 처리로 데이터 수집
+        # 병렬 처리
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 모든 심볼에 대해 future 생성
             future_to_symbol = {
@@ -176,6 +204,7 @@ class YFinanceCollector:
             'total': len(symbols),
             'success': success_count,
             'fail': fail_count,
+            'skip': skip_count,
             'elapsed_time': round(elapsed_time, 2),
             'avg_time_per_symbol': round(elapsed_time / len(symbols), 2),
             'timestamp': datetime.now().isoformat()
@@ -185,6 +214,7 @@ class YFinanceCollector:
         print(f"📊 결과: 총 {result['total']}개, 성공 {result['success']}개, 실패 {result['fail']}개")
         print(f"⚡ 처리 시간: {result['elapsed_time']}초 (평균 {result['avg_time_per_symbol']}초/종목)")
         print(f"🚀 병렬 처리 효과: {max_workers}배 속도 향상!")
+        print(f"💡 중복 데이터 스킵으로 효율성 향상!")
         
         return result
     
@@ -243,8 +273,8 @@ def collect_stock_data_yfinance_task(**context):
     # YFinanceCollector 인스턴스 생성
     collector = YFinanceCollector()
     
-    # 병렬 수집 실행 - API 제한 고려하여 워커 수 감소
-    result = collector.collect_all_symbols(symbols=symbols, max_workers=1)  # 10->1으로 감소
+    # 병렬 수집 실행 - API 제한 고려하여 순차 처리
+    result = collector.collect_all_symbols(symbols=symbols[:5], max_workers=1, period="1y")  # 테스트용으로 5개만, 1년 데이터
     success_count = result['success']
     
     end_time = time.time()

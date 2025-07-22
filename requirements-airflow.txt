@@ -17,6 +17,7 @@ kafka-python>=2.0.0
 
 # Financial data
 yfinance>=0.2.0
+curl_cffi>=0.5.0
 
 # 기타 필수 라이브러리  
 python-dotenv>=1.0.0

@@ -72,9 +72,12 @@ class TechnicalScanner:
         # 데이터베이스에 저장
         for signal in bb_signals:
             self.db.conn.execute("""
-                INSERT OR REPLACE INTO daily_watchlist 
+                INSERT INTO daily_watchlist 
                 (symbol, date, condition_type, condition_value, market_cap_tier)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (symbol, date, condition_type) DO UPDATE SET
+                    condition_value = EXCLUDED.condition_value,
+                    market_cap_tier = EXCLUDED.market_cap_tier
             """, (
                 signal['symbol'],
                 signal['date'],
