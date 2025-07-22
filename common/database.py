@@ -138,8 +138,13 @@ class DuckDBManager:
         now = datetime.now()
         for symbol_data in symbols:
             self.conn.execute("""
-                INSERT OR REPLACE INTO nasdaq_symbols (symbol, name, market_cap, sector, collected_at)
+                INSERT INTO nasdaq_symbols (symbol, name, market_cap, sector, collected_at)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (symbol) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    market_cap = EXCLUDED.market_cap,
+                    sector = EXCLUDED.sector,
+                    collected_at = EXCLUDED.collected_at
             """, (
                 symbol_data.get('symbol'),
                 symbol_data.get('name'),
@@ -148,6 +153,58 @@ class DuckDBManager:
                 now
             ))
     
+    def get_existing_dates(self, symbol: str, days_back: int = 30) -> set:
+        """
+        특정 종목의 기존 데이터 날짜 조회
+        
+        Args:
+            symbol: 종목 심볼
+            days_back: 최근 며칠 데이터를 확인할지
+            
+        Returns:
+            기존 데이터가 있는 날짜들의 set
+        """
+        try:
+            from datetime import date, timedelta
+            
+            # 최근 N일간의 날짜 범위
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days_back)
+            
+            result = self.conn.execute("""
+                SELECT date FROM stock_data
+                WHERE symbol = ? AND date >= ? AND date <= ?
+                ORDER BY date DESC
+            """, (symbol, start_date, end_date)).fetchall()
+            
+            return {row[0] for row in result}
+            
+        except Exception as e:
+            print(f"⚠️ {symbol}: 기존 날짜 조회 오류 - {e}")
+            return set()
+
+    def get_latest_date(self, symbol: str):
+        """
+        특정 종목의 최신 데이터 날짜 조회
+        
+        Args:
+            symbol: 종목 심볼
+            
+        Returns:
+            최신 데이터 날짜 (없으면 None)
+        """
+        try:
+            result = self.conn.execute("""
+                SELECT MAX(date) FROM stock_data
+                WHERE symbol = ?
+            """, (symbol,)).fetchone()
+            
+            return result[0] if result and result[0] else None
+            
+        except Exception as e:
+            print(f"⚠️ {symbol}: 최신 날짜 조회 오류 - {e}")
+            return None
+
     def save_stock_data(self, stock_data: Dict[str, Any]):
         """
         주가 데이터 저장
@@ -156,8 +213,14 @@ class DuckDBManager:
             stock_data: 주가 데이터
         """
         self.conn.execute("""
-            INSERT OR REPLACE INTO stock_data (symbol, date, open, high, low, close, volume)
+            INSERT INTO stock_data (symbol, date, open, high, low, close, volume)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (symbol, date) DO UPDATE SET
+                open = EXCLUDED.open,
+                high = EXCLUDED.high,
+                low = EXCLUDED.low,
+                close = EXCLUDED.close,
+                volume = EXCLUDED.volume
         """, (
             stock_data.get('symbol'),
             stock_data.get('date'),
@@ -176,11 +239,30 @@ class DuckDBManager:
             indicator_data: 기술적 지표 데이터
         """
         self.conn.execute("""
-            INSERT OR REPLACE INTO stock_data_technical_indicators 
+            INSERT INTO stock_data_technical_indicators 
             (symbol, date, bb_upper, bb_middle, bb_lower, macd, macd_signal, 
             macd_histogram, rsi, sma_5, sma_20, sma_60, ema_5, ema_20, ema_60, 
             cci, obv, ma_112, ma_224, ma_448)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (symbol, date) DO UPDATE SET
+                bb_upper = EXCLUDED.bb_upper,
+                bb_middle = EXCLUDED.bb_middle,
+                bb_lower = EXCLUDED.bb_lower,
+                macd = EXCLUDED.macd,
+                macd_signal = EXCLUDED.macd_signal,
+                macd_histogram = EXCLUDED.macd_histogram,
+                rsi = EXCLUDED.rsi,
+                sma_5 = EXCLUDED.sma_5,
+                sma_20 = EXCLUDED.sma_20,
+                sma_60 = EXCLUDED.sma_60,
+                ema_5 = EXCLUDED.ema_5,
+                ema_20 = EXCLUDED.ema_20,
+                ema_60 = EXCLUDED.ema_60,
+                cci = EXCLUDED.cci,
+                obv = EXCLUDED.obv,
+                ma_112 = EXCLUDED.ma_112,
+                ma_224 = EXCLUDED.ma_224,
+                ma_448 = EXCLUDED.ma_448
         """, (
             indicator_data.get('symbol'),
             indicator_data.get('date'),
