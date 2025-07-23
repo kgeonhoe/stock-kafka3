@@ -3,6 +3,7 @@
 
 import duckdb
 import os
+import json
 from typing import List, Dict, Any
 from datetime import datetime
 
@@ -20,6 +21,9 @@ class DuckDBManager:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.conn = duckdb.connect(db_path)
         self._create_tables()
+        
+        # 동적 지표 관리자 초기화
+        self.indicator_manager = DynamicIndicatorManager(self)
     
     def _create_tables(self):
         """필요한 테이블 생성"""
@@ -233,58 +237,42 @@ class DuckDBManager:
     
     def save_technical_indicators(self, indicator_data: Dict[str, Any]):
         """
-        기술적 지표 데이터 저장
-        
-        Args:
-            indicator_data: 기술적 지표 데이터
+        동적 기술적 지표 데이터 저장
         """
-        self.conn.execute("""
-            INSERT INTO stock_data_technical_indicators 
-            (symbol, date, bb_upper, bb_middle, bb_lower, macd, macd_signal, 
-            macd_histogram, rsi, sma_5, sma_20, sma_60, ema_5, ema_20, ema_60, 
-            cci, obv, ma_112, ma_224, ma_448)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (symbol, date) DO UPDATE SET
-                bb_upper = EXCLUDED.bb_upper,
-                bb_middle = EXCLUDED.bb_middle,
-                bb_lower = EXCLUDED.bb_lower,
-                macd = EXCLUDED.macd,
-                macd_signal = EXCLUDED.macd_signal,
-                macd_histogram = EXCLUDED.macd_histogram,
-                rsi = EXCLUDED.rsi,
-                sma_5 = EXCLUDED.sma_5,
-                sma_20 = EXCLUDED.sma_20,
-                sma_60 = EXCLUDED.sma_60,
-                ema_5 = EXCLUDED.ema_5,
-                ema_20 = EXCLUDED.ema_20,
-                ema_60 = EXCLUDED.ema_60,
-                cci = EXCLUDED.cci,
-                obv = EXCLUDED.obv,
-                ma_112 = EXCLUDED.ma_112,
-                ma_224 = EXCLUDED.ma_224,
-                ma_448 = EXCLUDED.ma_448
-        """, (
+        # 모든 가능한 지표 컬럼 가져오기
+        all_indicators = self.indicator_manager.get_all_indicator_names()
+        
+        # 기본 컬럼
+        base_columns = ['symbol', 'date']
+        columns = base_columns + all_indicators
+        
+        # 플레이스홀더 생성
+        placeholders = ', '.join(['?'] * len(columns))
+        
+        # UPDATE SET 절 생성
+        update_set = ', '.join([f"{col} = EXCLUDED.{col}" for col in all_indicators])
+        
+        # 데이터 준비
+        values = [
             indicator_data.get('symbol'),
-            indicator_data.get('date'),
-            indicator_data.get('bb_upper'),
-            indicator_data.get('bb_middle'),
-            indicator_data.get('bb_lower'),
-            indicator_data.get('macd'),
-            indicator_data.get('macd_signal'),
-            indicator_data.get('macd_histogram'),
-            indicator_data.get('rsi'),
-            indicator_data.get('sma_5'),
-            indicator_data.get('sma_20'),
-            indicator_data.get('sma_60'),
-            indicator_data.get('ema_5'),
-            indicator_data.get('ema_20'),
-            indicator_data.get('ema_60'),
-            indicator_data.get('cci'),
-            indicator_data.get('obv'),
-            indicator_data.get('ma_112'),
-            indicator_data.get('ma_224'),
-            indicator_data.get('ma_448')
-        ))
+            indicator_data.get('date')
+        ] + [indicator_data.get(col) for col in all_indicators]
+        
+        try:
+            self.conn.execute(f"""
+                INSERT INTO stock_data_technical_indicators 
+                ({', '.join(columns)})
+                VALUES ({placeholders})
+                ON CONFLICT (symbol, date) DO UPDATE SET
+                {update_set}
+            """, values)
+        except Exception as e:
+            print(f"❌ 지표 저장 오류: {e}")
+    
+    def add_indicator(self, category: str, name: str, indicator_type: str, **kwargs):
+        """새로운 지표 추가 (편의 메서드)"""
+        config = {"type": indicator_type, **kwargs}
+        self.indicator_manager.add_new_indicator(category, name, config)
     
     def get_active_symbols(self) -> List[str]:
         """활성 심볼 목록 조회"""
@@ -356,3 +344,93 @@ class DuckDBManager:
     def close(self):
         """연결 종료"""
         self.conn.close()
+
+class DynamicIndicatorManager:
+    """동적 기술적 지표 관리 클래스"""
+    
+    def __init__(self, db_manager):
+        self.db = db_manager
+        self.config_path = "/data/technical_indicators.json"
+        self.indicators_config = self._load_indicators_config()
+        self._ensure_all_columns()
+    
+    def _load_indicators_config(self) -> Dict:
+        """지표 설정 파일 로드"""
+        try:
+            with open(self.config_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            print("⚠️ 지표 설정 파일이 없어 기본 설정을 생성합니다.")
+            return self._create_default_config()
+    
+    def _create_default_config(self) -> Dict:
+        """기본 설정 생성"""
+        default_config = {
+            "indicators": {
+                "existing": {
+                    "bb_upper": {"type": "BB_UPPER", "period": 20},
+                    "bb_middle": {"type": "BB_MIDDLE", "period": 20},
+                    "bb_lower": {"type": "BB_LOWER", "period": 20},
+                    "macd": {"type": "MACD", "fast": 12, "slow": 26},
+                    "rsi": {"type": "RSI", "period": 14}
+                }
+            }
+        }
+        
+        # 설정 파일 저장
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        with open(self.config_path, 'w') as f:
+            json.dump(default_config, f, indent=2)
+        
+        return default_config
+    
+    def get_all_indicator_names(self) -> List[str]:
+        """모든 지표명 반환"""
+        indicators = []
+        for category in self.indicators_config.get("indicators", {}).values():
+            indicators.extend(category.keys())
+        return indicators
+    
+    def _ensure_all_columns(self):
+        """모든 지표 컬럼이 테이블에 존재하는지 확인 후 추가"""
+        all_indicators = self.get_all_indicator_names()
+        
+        for indicator_name in all_indicators:
+            self._add_column_if_not_exists(indicator_name)
+    
+    def _add_column_if_not_exists(self, column_name: str):
+        """컬럼이 없으면 추가"""
+        try:
+            # 컬럼 존재 여부 확인
+            existing = self.db.conn.execute("""
+                SELECT COUNT(*) FROM information_schema.columns 
+                WHERE table_name = 'stock_data_technical_indicators' 
+                AND column_name = ?
+            """, (column_name,)).fetchone()[0]
+            
+            if existing == 0:
+                self.db.conn.execute(f"""
+                    ALTER TABLE stock_data_technical_indicators 
+                    ADD COLUMN {column_name} DOUBLE
+                """)
+                print(f"✅ 새 지표 컬럼 추가: {column_name}")
+                
+        except Exception as e:
+            print(f"⚠️ 컬럼 {column_name} 추가 실패: {e}")
+    
+    def add_new_indicator(self, category: str, name: str, config: Dict):
+        """새로운 지표 추가"""
+        # 설정 파일 업데이트
+        if category not in self.indicators_config["indicators"]:
+            self.indicators_config["indicators"][category] = {}
+        
+        self.indicators_config["indicators"][category][name] = config
+        
+        # 설정 파일 저장
+        with open(self.config_path, 'w') as f:
+            json.dump(self.indicators_config, f, indent=2)
+        
+        # 테이블에 컬럼 추가
+        self._add_column_if_not_exists(name)
+        
+        print(f"✅ 새 지표 추가됨: {name} ({category})")

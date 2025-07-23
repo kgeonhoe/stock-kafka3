@@ -3,6 +3,12 @@ Kafka Configuration
 """
 
 import os
+from enum import Enum
+
+class DataSource(Enum):
+    """데이터 소스 구분"""
+    KIS = "kis"
+    YFINANCE = "yfinance"
 
 class KafkaConfig:
     """Kafka 설정 관리"""

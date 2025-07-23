@@ -4,6 +4,7 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from datetime import datetime, timedelta
 import sys
 import os
@@ -258,5 +259,21 @@ calculate_indicators = PythonOperator(
     retry_delay=timedelta(minutes=10)
 )
 
+# 모든 작업 완료 후 관심종목 스캔 트리거
+trigger_watchlist_analysis = TriggerDagRunOperator(
+    task_id='trigger_daily_watchlist',
+    trigger_dag_id='daily_watchlist_scanner',
+    wait_for_completion=False,  # 완료까지 기다리지 않음
+    dag=dag,
+    doc_md="""
+    ## 관심종목 분석 트리거
+    
+    - 데이터 수집 및 기술적 지표 계산 완료 후
+    - 자동으로 관심종목 스캔 DAG 실행
+    - 볼린저 밴드 상단 터치 종목 스캔
+    """,
+    retries=1
+)
+
 # 태스크 의존성 설정
-collect_symbols >> collect_ohlcv >> calculate_indicators
+collect_symbols >> collect_ohlcv >> calculate_indicators >> trigger_watchlist_analysis
