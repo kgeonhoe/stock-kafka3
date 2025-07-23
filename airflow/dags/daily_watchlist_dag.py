@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
+from airflow.sensors.external_task import ExternalTaskSensor
 import sys
 import os
 
@@ -102,11 +103,49 @@ default_args = {
 dag = DAG(
     'daily_watchlist_scanner',
     default_args=default_args,
-    description='일별 기술적 지표 기반 관심종목 스캔',
-    schedule_interval='0 1 * * 1-5',  # 평일 오전 1시 실행 (장마감 후)
+    description='일별 기술적 지표 기반 관심종목 스캔 (nasdaq_daily_pipeline 의존)',
+    schedule_interval=None,  # ExternalTaskSensor로 트리거되므로 None
     catchup=False,
     max_active_runs=1,
-    tags=['stock', 'technical-analysis', 'watchlist']
+    tags=['stock', 'technical-analysis', 'watchlist', 'dependent']
+)
+
+# ⭐ DAG 간 의존성: nasdaq 데이터 수집 완료 대기
+wait_for_nasdaq_data = ExternalTaskSensor(
+    task_id='wait_for_nasdaq_data_collection',
+    external_dag_id='nasdaq_daily_pipeline',
+    external_task_id='collect_ohlcv_data',  # nasdaq_daily_pipeline의 주가 데이터 수집 태스크
+    allowed_states=['success'],
+    failed_states=['failed', 'upstream_failed'],
+    timeout=7200,  # 2시간 타임아웃
+    poke_interval=300,  # 5분마다 체크
+    dag=dag,
+    doc_md="""
+    ## NASDAQ 데이터 수집 완료 대기
+    
+    - nasdaq_daily_pipeline DAG의 주가 데이터 수집이 완료된 후 실행
+    - 최신 주식 데이터가 준비되면 기술적 스캔 시작
+    - 타임아웃: 2시간, 체크 간격: 5분
+    """
+)
+
+# 기술적 지표 계산 완료 대기 (추가 의존성)
+wait_for_technical_indicators = ExternalTaskSensor(
+    task_id='wait_for_technical_calculation',
+    external_dag_id='nasdaq_daily_pipeline',
+    external_task_id='calculate_technical_indicators',  # 기술적 지표 계산 태스크
+    allowed_states=['success'],
+    failed_states=['failed', 'upstream_failed'],
+    timeout=3600,  # 1시간 타임아웃
+    poke_interval=180,  # 3분마다 체크
+    dag=dag,
+    doc_md="""
+    ## 기술적 지표 계산 완료 대기
+    
+    - nasdaq_daily_pipeline DAG의 기술적 지표 계산이 완료된 후 실행
+    - RSI, 볼린저 밴드 등 기술적 지표가 준비되면 스캔 시작
+    - 타임아웃: 1시간, 체크 간격: 3분
+    """
 )
 
 # 태스크 정의
@@ -147,5 +186,5 @@ summary_task = PythonOperator(
     """
 )
 
-# 태스크 의존성 설정
-scan_task >> cleanup_task >> summary_task
+# 태스크 의존성 설정: 두 센서가 모두 완료된 후 스캔 실행
+[wait_for_nasdaq_data, wait_for_technical_indicators] >> scan_task >> cleanup_task >> summary_task

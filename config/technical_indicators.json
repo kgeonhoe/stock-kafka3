@@ -1,0 +1,27 @@
+{
+  "indicators": {
+    "moving_averages": {
+      "sma_10": {"type": "SMA", "period": 10},
+      "sma_50": {"type": "SMA", "period": 50},
+      "sma_200": {"type": "SMA", "period": 200},
+      "ema_12": {"type": "EMA", "period": 12},
+      "ema_26": {"type": "EMA", "period": 26}
+    },
+    "momentum": {
+      "stoch_k": {"type": "STOCH_K", "period": 14},
+      "stoch_d": {"type": "STOCH_D", "period": 3},
+      "williams_r": {"type": "WILLIAMS_R", "period": 14},
+      "roc": {"type": "ROC", "period": 12}
+    },
+    "volatility": {
+      "atr": {"type": "ATR", "period": 14},
+      "bb_width": {"type": "BB_WIDTH", "period": 20},
+      "bb_percent": {"type": "BB_PERCENT", "period": 20}
+    },
+    "volume": {
+      "vwap": {"type": "VWAP", "period": 20},
+      "ad_line": {"type": "AD_LINE", "period": 14},
+      "cmf": {"type": "CMF", "period": 20}
+    }
+  }
+}

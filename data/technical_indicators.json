@@ -1,0 +1,27 @@
+{
+  "indicators": {
+    "existing": {
+      "bb_upper": {
+        "type": "BB_UPPER",
+        "period": 20
+      },
+      "bb_middle": {
+        "type": "BB_MIDDLE",
+        "period": 20
+      },
+      "bb_lower": {
+        "type": "BB_LOWER",
+        "period": 20
+      },
+      "macd": {
+        "type": "MACD",
+        "fast": 12,
+        "slow": 26
+      },
+      "rsi": {
+        "type": "RSI",
+        "period": 14
+      }
+    }
+  }
+}

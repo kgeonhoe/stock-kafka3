@@ -294,7 +294,7 @@ services:
       sh -c "
         echo 'Kafka 연결 대기 중...'
         sleep 10
-        python /app/kafka/test_multi_source_producer.py
+        python /app/kafka/multi_source_producer.py
       "
     restart: unless-stopped
 
