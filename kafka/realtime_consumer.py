@@ -17,7 +17,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, window, avg, expr, udf, from_json, to_timestamp
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, TimestampType
 
-from common.database import DuckDBManager
+from common.postgresql_manager import PostgreSQLManager
 from common.slack_notifier import SlackNotifier
 from config.kafka_config import KafkaConfig
 

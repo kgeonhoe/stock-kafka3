@@ -25,7 +25,7 @@ class YFinanceCollector:
         """
         self.db = DuckDBManager(db_path)
     
-    def collect_stock_data(self, symbol: str, period: str = "1y") -> bool:
+    def collect_stock_data(self, symbol: str, period: str = "5y") -> bool:
         """
         개별 종목 주가 데이터 수집 (중복 날짜 스킵)
         
@@ -42,23 +42,18 @@ class YFinanceCollector:
         
         try:
             # 1. 기존 데이터 확인
-            existing_dates = self.db.get_existing_dates(symbol, days_back=365)  # 1년간 데이터 확인
+            existing_dates = self.db.get_existing_dates(symbol, days_back=1825)  # 5년간 데이터 확인 (365*5)
             latest_date = self.db.get_latest_date(symbol)
             
             print(f"🔍 {symbol}: 기존 데이터 {len(existing_dates)}일, 최신 날짜: {latest_date}")
             
-            # 2. API 호출 제한 방지를 위한 지연 (더 길게)
-            delay = random.uniform(2.0, 4.0)  # 2-4초 랜덤 지연 (기존 0.2-0.8초에서 증가)
+            # 2. API 호출 제한 방지를 위한 지연 (5년 데이터는 더 많으므로 지연 시간 증가)
+            delay = random.uniform(3.0, 5.0)  # 3-5초 랜덤 지연 (5년 데이터 수집용)
             time.sleep(delay)
             
-            # 3. yfinance로 데이터 수집 (최적화된 설정 + User-Agent 변경)
-            import requests
-            session = requests.Session()
-            session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            })
-            
-            ticker = yf.Ticker(symbol, session=session)
+            # 3. yfinance로 데이터 수집 (curl_cffi 세션 제거로 API 오류 해결)
+            # Yahoo API가 curl_cffi를 요구하므로 세션 설정 제거
+            ticker = yf.Ticker(symbol)
             hist = ticker.history(
                 period=period, 
                 auto_adjust=True,      # 배당/분할 자동 조정
@@ -230,7 +225,7 @@ def collect_stock_data_yfinance_task(**context):
     import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
     
-    print("🚀 yfinance 고속 병렬 주가 데이터 수집 시작!")
+    print("🚀 yfinance 고속 병렬 주가 데이터 수집 시작! (5년 데이터)")
     start_time = time.time()
     
         # DuckDB에서 NASDAQ 심볼 목록 조회 (테스트용 제한)
@@ -273,18 +268,18 @@ def collect_stock_data_yfinance_task(**context):
     # YFinanceCollector 인스턴스 생성
     collector = YFinanceCollector()
     
-    # 병렬 수집 실행 - API 제한 고려하여 순차 처리
-    result = collector.collect_all_symbols(symbols=symbols[:5], max_workers=1, period="1y")  # 테스트용으로 5개만, 1년 데이터
+    # 병렬 수집 실행 - 전체 종목 처리 (5년 데이터)
+    result = collector.collect_all_symbols(symbols=symbols, max_workers=3, period="5y")  # 전체 종목, 3개 워커, 5년 데이터
     success_count = result['success']
     
     end_time = time.time()
     duration = end_time - start_time
     
-    print(f"✅ yfinance 병렬 수집 완료!")
+    print(f"✅ yfinance 병렬 수집 완료! (5년 데이터)")
     print(f"📊 처리 결과: {success_count}/{len(symbols)}개 성공")
     print(f"⏱️  총 소요시간: {duration:.2f}초 (평균 {duration/len(symbols):.2f}초/종목)")
     print(f"🚄 성능: {len(symbols)/duration:.2f} 종목/초")
-    print(f"🎯 전체 NASDAQ 종목 {len(symbols)}개 처리 완료!")
+    print(f"🎯 전체 NASDAQ 종목 {len(symbols)}개 처리 완료! (5년 히스토리)")
     
     return {
         'total_symbols': len(symbols),

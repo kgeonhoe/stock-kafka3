@@ -13,7 +13,7 @@ import os
 # 컨테이너 환경에서는 /app이 기본 경로이므로 Python 경로에 추가
 sys.path.insert(0, '/app')
 
-from common.database import DuckDBManager
+from common.postgresql_manager import PostgreSQLManager
 from common.kis_api_client import KISAPIClient
 
 class RealtimeStockProducer:
@@ -32,7 +32,13 @@ class RealtimeStockProducer:
             bootstrap_servers=bootstrap_servers,
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
         )
-        self.db = DuckDBManager(db_path)
+        self.db = PostgreSQLManager(
+            host="postgres",  # Docker 환경
+            port=5432,
+            database="airflow",
+            user="airflow",
+            password="airflow"
+        )
         self.kis_client = KISAPIClient()
     
     async def produce_realtime_data(self, symbol: str):

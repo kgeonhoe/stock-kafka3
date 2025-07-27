@@ -11,11 +11,13 @@ import os
 
 # 플러그인 경로 추가
 sys.path.insert(0, '/opt/airflow/plugins')
+sys.path.insert(0, '/opt/airflow/common')
 
 # 플러그인 임포트
 from collect_nasdaq_symbols_api import NasdaqSymbolCollector
 from collect_stock_data_yfinance import collect_stock_data_yfinance_task
 from technical_indicators import calculate_technical_indicators_task
+from database import DuckDBManager
 
 # 기본 인수 설정
 default_args = {
@@ -57,6 +59,16 @@ def collect_nasdaq_symbols_func(**kwargs):
         print(f"📁 데이터베이스 연결: {DB_PATH}")
         db = DuckDBManager(DB_PATH)
         print("✅ DuckDB 연결 성공")
+        
+        # DB 파일 권한 설정
+        if os.path.exists(DB_PATH):
+            try:
+                os.chmod(DB_PATH, 0o666)
+                print("✅ DB 파일 권한 설정 완료 (666)")
+            except PermissionError as pe:
+                print(f"⚠️ 권한 변경 실패 (무시하고 계속): {pe}")
+                current_permissions = oct(os.stat(DB_PATH).st_mode)[-3:]
+                print(f"📋 현재 권한으로 진행: {current_permissions}")
         
         # 실제 나스닥 API 수집 시도
         print("🔧 나스닥 API 컬렉터 초기화...")
@@ -149,7 +161,52 @@ def collect_ohlcv_func(**kwargs):
     from database import DuckDBManager
     
     try:
-        # DB에서 심볼 확인
+        # DB 디렉토리 및 파일 권한 확인/설정
+        import stat
+        db_dir = os.path.dirname(DB_PATH)
+        
+        # 디렉토리 권한 확인
+        if os.path.exists(db_dir):
+            dir_permissions = oct(os.stat(db_dir).st_mode)[-3:]
+            print(f"🔍 DB 디렉토리 권한: {dir_permissions}")
+            
+            try:
+                os.chmod(db_dir, 0o777)
+                print(f"✅ 디렉토리 권한 수정: 777")
+            except PermissionError as pe:
+                print(f"⚠️ 디렉토리 권한 변경 실패: {pe}")
+        else:
+            print(f"⚠️ DB 디렉토리가 존재하지 않음: {db_dir}")
+            try:
+                os.makedirs(db_dir, mode=0o777, exist_ok=True)
+                print(f"✅ DB 디렉토리 생성: {db_dir}")
+            except Exception as e:
+                print(f"⚠️ 디렉토리 생성 실패: {e}")
+        
+        # DB 파일 권한 확인 및 수정
+        if os.path.exists(DB_PATH):
+            current_permissions = oct(os.stat(DB_PATH).st_mode)[-3:]
+            print(f"🔍 현재 DB 파일 권한: {current_permissions}")
+            
+            try:
+                os.chmod(DB_PATH, 0o666)
+                print(f"✅ DB 파일 권한 수정: 666")
+            except PermissionError as pe:
+                print(f"⚠️ 파일 권한 변경 실패 (무시하고 계속): {pe}")
+                print(f"📋 현재 권한으로 진행: {current_permissions}")
+        else:
+            print(f"⚠️ DB 파일이 존재하지 않음: {DB_PATH}")
+            # 빈 파일 생성 시도
+            try:
+                with open(DB_PATH, 'a'):
+                    pass
+                os.chmod(DB_PATH, 0o666)
+                print(f"✅ DB 파일 생성 및 권한 설정 완료")
+            except Exception as e:
+                print(f"⚠️ DB 파일 생성 실패: {e}")
+        
+        # DB 연결 시도
+        print(f"🔗 DuckDB 연결 시도: {DB_PATH}")
         db = DuckDBManager(DB_PATH)
         saved_symbols = db.get_active_symbols()
         print(f"🔍 DB에서 조회된 심볼: {saved_symbols}")
