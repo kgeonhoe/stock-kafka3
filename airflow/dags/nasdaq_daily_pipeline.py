@@ -32,11 +32,11 @@ default_args = {
 dag = DAG(
     'nasdaq_daily_pipeline',
     default_args=default_args,
-    description='🚀 나스닥 일일 데이터 수집 파이프라인 (Spark 기반)',
+    description='🚀 나스닥 완전 파이프라인: 수집→분석→스캔→복제 (Kafka Ready)',
     schedule_interval='0 7 * * *',  # 한국시간 오전 7시 (미국 장마감 후)
     catchup=False,
     max_active_runs=1,
-    tags=['nasdaq', 'stock', 'spark', 'technical-analysis']
+    tags=['nasdaq', 'stock', 'spark', 'technical-analysis', 'watchlist', 'kafka']
 )
 
 # 데이터베이스 경로
@@ -243,6 +243,135 @@ def calculate_indicators_func(**kwargs):
         import traceback
         print(f"📜 상세 오류:\n{traceback.format_exc()}")
         raise
+
+# 4. 관심종목 스캔
+def watchlist_scan_func(**kwargs):
+    """볼린저 밴드 기반 관심종목 스캔 함수"""
+    print("🎯 관심종목 스캔 시작...")
+    
+    import sys
+    sys.path.insert(0, '/opt/airflow/common')
+    from database import DuckDBManager
+    from technical_scanner import TechnicalScanner
+    
+    try:
+        # DB 연결
+        db = DuckDBManager(DB_PATH)
+        scanner = TechnicalScanner(db)
+        
+        # 데이터 가용성 확인
+        data_status = scanner.check_data_availability()
+        print(f"📊 데이터 상태: {data_status}")
+        
+        if not data_status.get('has_sufficient_data', False):
+            print("⚠️ 충분한 데이터가 없어 스캔을 건너뜁니다.")
+            return {'skipped': True, 'reason': 'insufficient_data'}
+        
+        # 볼린저 밴드 상단 터치 종목 스캔
+        print("🔍 볼린저 밴드 상단 터치 종목 스캔 중...")
+        bb_upper_stocks = scanner.scan_bollinger_band_upper_touch()
+        
+        # 결과 정리
+        result = {
+            'scan_type': 'bollinger_band_upper_touch',
+            'total_candidates': len(bb_upper_stocks),
+            'candidates': bb_upper_stocks[:10],  # 상위 10개만 로그에 출력
+            'timestamp': datetime.now().isoformat(),
+            'data_status': data_status
+        }
+        
+        print(f"🎯 관심종목 스캔 완료!")
+        print(f"📊 발견된 종목: {len(bb_upper_stocks)}개")
+        if bb_upper_stocks:
+            print(f"🔥 상위 5개 종목: {[stock['symbol'] for stock in bb_upper_stocks[:5]]}")
+        
+        db.close()
+        return result
+        
+    except Exception as e:
+        print(f"❌ 관심종목 스캔 오류: {e}")
+        import traceback
+        print(f"📜 상세 오류:\n{traceback.format_exc()}")
+        if 'db' in locals():
+            db.close()
+        raise
+
+# 5. 데이터베이스 복제 및 권한 설정
+def create_replica_and_permissions_func(**kwargs):
+    """DB 복제본 생성 및 Kafka Producer용 권한 설정 함수"""
+    print("🔄 데이터베이스 복제 및 권한 설정 시작...")
+    
+    import shutil
+    import stat
+    
+    try:
+        # 복제본 경로 설정
+        replica_path = "/data/duckdb/stock_data_replica.db"
+        
+        # 1. 기존 복제본 백업 (있다면)
+        if os.path.exists(replica_path):
+            backup_path = f"{replica_path}.backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            try:
+                shutil.copy2(replica_path, backup_path)
+                print(f"✅ 기존 복제본 백업: {backup_path}")
+            except Exception as backup_error:
+                print(f"⚠️ 백업 실패 (무시하고 계속): {backup_error}")
+        
+        # 2. 메인 DB를 복제본으로 복사
+        if os.path.exists(DB_PATH):
+            print(f"📁 메인 DB 복사: {DB_PATH} → {replica_path}")
+            shutil.copy2(DB_PATH, replica_path)
+            print("✅ 데이터베이스 복제 완료")
+        else:
+            print(f"❌ 메인 DB 파일이 없음: {DB_PATH}")
+            return {'error': 'main_db_not_found'}
+        
+        # 3. 복제본 권한 설정 (읽기 전용으로 설정)
+        try:
+            # 모든 사용자에게 읽기 권한 부여
+            os.chmod(replica_path, 0o644)  # rw-r--r--
+            print("✅ 복제본 권한 설정 완료 (644 - 읽기 전용)")
+            
+            # 권한 확인
+            permissions = oct(os.stat(replica_path).st_mode)[-3:]
+            print(f"🔍 설정된 복제본 권한: {permissions}")
+            
+        except PermissionError as pe:
+            print(f"⚠️ 권한 설정 실패 (무시하고 계속): {pe}")
+            # 실패해도 파일은 존재하므로 계속 진행
+        
+        # 4. 디렉토리 권한도 확인 및 설정
+        db_dir = os.path.dirname(replica_path)
+        try:
+            os.chmod(db_dir, 0o755)  # rwxr-xr-x
+            print("✅ DB 디렉토리 권한 설정 완료 (755)")
+        except PermissionError as pe:
+            print(f"⚠️ 디렉토리 권한 설정 실패: {pe}")
+        
+        # 5. 파일 크기 및 상태 확인
+        if os.path.exists(replica_path):
+            file_size = os.path.getsize(replica_path)
+            file_size_mb = file_size / (1024 * 1024)
+            print(f"📊 복제본 크기: {file_size_mb:.2f} MB")
+        
+        result = {
+            'replica_path': replica_path,
+            'file_size_mb': file_size_mb if 'file_size_mb' in locals() else 0,
+            'permissions_set': True,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        print("🎉 데이터베이스 복제 및 권한 설정 완료!")
+        print(f"📁 복제본 위치: {replica_path}")
+        print("🚀 Kafka Producer가 복제본을 읽을 수 있습니다!")
+        
+        return result
+        
+    except Exception as e:
+        print(f"❌ 복제 및 권한 설정 오류: {e}")
+        import traceback
+        print(f"📜 상세 오류:\n{traceback.format_exc()}")
+        raise
     
 # 태스크 정의
 collect_symbols = PythonOperator(
@@ -270,19 +399,19 @@ collect_ohlcv = PythonOperator(
     python_callable=collect_ohlcv_func,
     dag=dag,
     doc_md="""
-    ## � yfinance 기반 주가 데이터 수집 (OHLCV)
+    ## 📊 yfinance 기반 주가 데이터 수집 (OHLCV)
     
     **목적**: Yahoo Finance API로 고속 주가 데이터 수집
     
     **처리 과정**:
     1. 저장된 종목 리스트 조회
-    2. yfinance API로 1년치 주가 데이터 수집 (1회 호출로 전체 기간)
+    2. yfinance API로 5년치 주가 데이터 수집 (1회 호출로 전체 기간)
     3. 데이터 정제 및 검증
     4. DuckDB에 배치 저장
     
     **데이터**: Open, High, Low, Close, Volume (일별)
-    **기간**: 1년 (252 거래일)
-    **장점**: KIS API 대비 5-10배 빠른 속도
+    **기간**: 5년 (약 1,260 거래일)
+    **장점**: KIS API 대비 5-10배 빠른 속도, 장기 트렌드 분석 가능
     """,
     retries=3,
     retry_delay=timedelta(minutes=5)
@@ -316,21 +445,58 @@ calculate_indicators = PythonOperator(
     retry_delay=timedelta(minutes=10)
 )
 
-# 모든 작업 완료 후 관심종목 스캔 트리거
-trigger_watchlist_analysis = TriggerDagRunOperator(
-    task_id='trigger_daily_watchlist',
-    trigger_dag_id='daily_watchlist_scanner',
-    wait_for_completion=False,  # 완료까지 기다리지 않음
+# 관심종목 스캔 태스크
+watchlist_scan = PythonOperator(
+    task_id='watchlist_scan',
+    python_callable=watchlist_scan_func,
     dag=dag,
     doc_md="""
-    ## 관심종목 분석 트리거
+    ## 🎯 관심종목 스캔
     
-    - 데이터 수집 및 기술적 지표 계산 완료 후
-    - 자동으로 관심종목 스캔 DAG 실행
-    - 볼린저 밴드 상단 터치 종목 스캔
+    **목적**: 기술적 분석을 통한 투자 후보 종목 발굴
+    
+    **처리 과정**:
+    1. 데이터 가용성 확인
+    2. 볼린저 밴드 상단 터치 종목 스캔
+    3. 조건을 만족하는 종목 리스트 생성
+    4. 상위 종목들을 관심종목으로 선정
+    
+    **스캔 조건**:
+    - 볼린저 밴드 상단 근접 터치
+    - 충분한 거래량
+    - 기술적 지표 조합 분석
+    
+    **출력**: 관심종목 리스트와 분석 결과
     """,
-    retries=1
+    retries=2,
+    retry_delay=timedelta(minutes=5)
 )
 
-# 태스크 의존성 설정
-collect_symbols >> collect_ohlcv >> calculate_indicators >> trigger_watchlist_analysis
+# DB 복제 및 권한 설정 태스크
+create_replica = PythonOperator(
+    task_id='create_replica_and_permissions',
+    python_callable=create_replica_and_permissions_func,
+    dag=dag,
+    doc_md="""
+    ## 🔄 데이터베이스 복제 및 권한 설정
+    
+    **목적**: Kafka Producer용 읽기 전용 DB 복제본 생성
+    
+    **처리 과정**:
+    1. 기존 복제본 백업 (있다면)
+    2. 메인 DB를 복제본으로 복사
+    3. 복제본 권한 설정 (644 - 읽기 전용)
+    4. 디렉토리 권한 설정 (755)
+    5. 파일 크기 및 상태 확인
+    
+    **결과**:
+    - stock_data_replica.db 생성
+    - Kafka Producer 접근 가능한 권한 설정
+    - 실시간 스트리밍을 위한 준비 완료
+    """,
+    retries=2,
+    retry_delay=timedelta(minutes=3)
+)
+
+# 태스크 의존성 설정 - 완전한 파이프라인
+collect_symbols >> collect_ohlcv >> calculate_indicators >> watchlist_scan >> create_replica
