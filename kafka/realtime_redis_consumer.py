@@ -19,6 +19,7 @@ from pyspark.sql.types import StructType, StructField, StringType, DoubleType, T
 # 로컬 패키지들
 from common.redis_manager import RedisManager
 from common.technical_indicator_calculator import TechnicalIndicatorCalculator
+from config.kafka_config import KafkaConfig
 
 def process_realtime_data_with_spark():
     """Spark로 실시간 데이터 처리 및 Redis 저장 + 기술적 지표 계산"""
@@ -47,12 +48,14 @@ def process_realtime_data_with_spark():
         
         spark.sparkContext.setLogLevel("WARN")
         
-        # Kafka 설정
-        kafka_bootstrap_servers = "kafka:29092"
-        topics = ["kis-stock", "yfinance-stock"]
+        # Kafka 설정 (config 파일 사용)
+        kafka_bootstrap_servers = "kafka:29092"  # 컨테이너 내부 주소
+        topics = [KafkaConfig.TOPIC_KIS_STOCK, KafkaConfig.TOPIC_YFINANCE_STOCK]
+        consumer_group = KafkaConfig.CONSUMER_GROUP_REALTIME
         
         print(f"📡 Kafka 서버: {kafka_bootstrap_servers}")
         print(f"📋 구독 토픽: {topics}")
+        print(f"👥 Consumer Group: {consumer_group}")
         
         # JSON 스키마 정의
         schema = StructType([
@@ -161,12 +164,14 @@ def process_realtime_data_with_spark():
                 import traceback
                 traceback.print_exc()
         
-        # Kafka 스트림 읽기 (Spark Structured Streaming 최소 설정)
+        # Kafka 스트림 읽기 (consumer group 설정 포함)
         df = spark \
             .readStream \
             .format("kafka") \
             .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
             .option("subscribe", ",".join(topics)) \
+            .option("kafka.group.id", "spark-realtime-consumer-group") \
+            .option("kafka.client.id", "spark-realtime-client") \
             .option("startingOffsets", "latest") \
             .option("failOnDataLoss", "false") \
             .load()
@@ -178,11 +183,11 @@ def process_realtime_data_with_spark():
             col("value").cast("string").alias("message")
         )
         
-        # 배치 처리로 스트림 출력 (consumer group 체크포인트 경로 지정)
+        # 배치 처리로 스트림 출력 (consumer group별 체크포인트)
         query = parsed_df.writeStream \
             .outputMode("append") \
             .foreachBatch(process_batch) \
-            .option("checkpointLocation", "/data/checkpoints/kafka-redis-consumer-group") \
+            .option("checkpointLocation", "/data/checkpoints/spark-realtime-consumer-group") \
             .trigger(processingTime="30 seconds") \
             .start()
         
