@@ -235,6 +235,51 @@ class DuckDBManager:
             stock_data.get('volume')
         ))
     
+    def save_stock_data_batch(self, stock_data_list: List[Dict[str, Any]]) -> int:
+        """
+        주가 데이터 배치 저장 (성능 최적화)
+        
+        Args:
+            stock_data_list: 주가 데이터 리스트
+            
+        Returns:
+            저장된 레코드 수
+        """
+        if not stock_data_list:
+            return 0
+        
+        try:
+            # 배치 데이터 준비
+            batch_values = []
+            for stock_data in stock_data_list:
+                batch_values.append((
+                    stock_data.get('symbol'),
+                    stock_data.get('date'),
+                    stock_data.get('open'),
+                    stock_data.get('high'),
+                    stock_data.get('low'),
+                    stock_data.get('close'),
+                    stock_data.get('volume')
+                ))
+            
+            # 배치 INSERT 실행
+            self.conn.executemany("""
+                INSERT INTO stock_data (symbol, date, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (symbol, date) DO UPDATE SET
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    volume = EXCLUDED.volume
+            """, batch_values)
+            
+            return len(batch_values)
+            
+        except Exception as e:
+            print(f"배치 저장 오류: {e}")
+            raise
+    
     def save_technical_indicators(self, indicator_data: Dict[str, Any]):
         """
         동적 기술적 지표 데이터 저장

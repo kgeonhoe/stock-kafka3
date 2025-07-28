@@ -47,8 +47,8 @@ class YFinanceCollector:
             
             print(f"🔍 {symbol}: 기존 데이터 {len(existing_dates)}일, 최신 날짜: {latest_date}")
             
-            # 2. API 호출 제한 방지를 위한 지연 (5년 데이터는 더 많으므로 지연 시간 증가)
-            delay = random.uniform(3.0, 5.0)  # 3-5초 랜덤 지연 (5년 데이터 수집용)
+            # 2. API 호출 제한 방지를 위한 지연 (5년 데이터용 - 배치 처리로 단축)
+            delay = random.uniform(1.0, 2.0)  # 1-2초 랜덤 지연 (배치 처리로 단축)
             time.sleep(delay)
             
             # 3. yfinance로 데이터 수집 (curl_cffi 세션 제거로 API 오류 해결)
@@ -94,10 +94,15 @@ class YFinanceCollector:
                 print(f"✅ {symbol}: 모든 데이터가 이미 존재함 ({total_records}개 중 신규 0개)")
                 return True
             
-            print(f"📊 {symbol}: {total_records}개 중 신규 {new_records}개 데이터만 저장")
+            # 6. DuckDB에 신규 데이터 배치 저장 (성능 최적화)
+            if new_records == 0:
+                print(f"✅ {symbol}: 모든 데이터가 이미 존재함 ({total_records}개 중 신규 0개)")
+                return True
             
-            # 6. DuckDB에 신규 데이터만 저장
-            save_count = 0
+            print(f"📊 {symbol}: {total_records}개 중 신규 {new_records}개 데이터 배치 저장")
+            
+            # 배치 저장을 위한 데이터 준비
+            batch_data = []
             for _, row in hist_filtered.iterrows():
                 try:
                     stock_data = {
@@ -109,17 +114,47 @@ class YFinanceCollector:
                         'close': float(row['close']),
                         'volume': int(row['volume'])
                     }
-                    self.db.save_stock_data(stock_data)
-                    save_count += 1
-                except Exception as save_error:
-                    print(f"⚠️ {symbol}: 저장 오류 - {save_error}")
-                    continue  # 개별 레코드 오류는 무시하고 계속 진행
+                    batch_data.append(stock_data)
+                except Exception as data_error:
+                    print(f"⚠️ {symbol}: 데이터 변환 오류 - {data_error}")
+                    continue
             
-            if save_count > 0:
-                print(f"✅ {symbol}: {save_count}개 신규 레코드 저장 성공")
-                return True
+            # 배치 저장 (한 번에 모든 데이터 저장)
+            if batch_data:
+                try:
+                    print(f"💾 {symbol}: {len(batch_data)}개 레코드 배치 저장 시작...")
+                    import sys
+                    sys.stdout.flush()  # 로그 즉시 출력
+                    
+                    save_count = self.db.save_stock_data_batch(batch_data)
+                    print(f"✅ {symbol}: {save_count}개 신규 레코드 배치 저장 성공")
+                    sys.stdout.flush()  # 로그 즉시 출력
+                    return True
+                except Exception as batch_error:
+                    print(f"❌ {symbol}: 배치 저장 실패 - {batch_error}")
+                    import sys
+                    sys.stdout.flush()  # 로그 즉시 출력
+                    
+                    # 배치 저장 실패시 개별 저장으로 폴백
+                    print(f"🔄 {symbol}: 개별 저장으로 폴백...")
+                    sys.stdout.flush()  # 로그 즉시 출력
+                    save_count = 0
+                    for stock_data in batch_data:
+                        try:
+                            self.db.save_stock_data(stock_data)
+                            save_count += 1
+                        except Exception as save_error:
+                            print(f"⚠️ {symbol}: 개별 저장 오류 - {save_error}")
+                            continue
+                    
+                    if save_count > 0:
+                        print(f"✅ {symbol}: {save_count}개 개별 저장 완료")
+                        return True
+                    else:
+                        print(f"❌ {symbol}: 저장된 레코드 없음")
+                        return False
             else:
-                print(f"❌ {symbol}: 저장된 레코드 없음")
+                print(f"❌ {symbol}: 변환된 데이터 없음")
                 return False
             
         except Exception as e:
@@ -184,7 +219,14 @@ class YFinanceCollector:
                     success = future.result()
                     if success:
                         success_count += 1
-                        print(f"✅ {symbol} 성공 ({i}/{len(symbols)}) - {(i/len(symbols)*100):.1f}%")
+                        progress_msg = f"✅ {symbol} 성공 ({i}/{len(symbols)}) - {(i/len(symbols)*100):.1f}%"
+                        print(progress_msg)
+                        
+                        # 10개마다 추가 진행 상황 출력
+                        if i % 10 == 0:
+                            print(f"📈 진행 상황: {i}/{len(symbols)} 완료 ({success_count}개 성공, {fail_count}개 실패)")
+                            import sys
+                            sys.stdout.flush()  # 로그 즉시 출력
                     else:
                         fail_count += 1
                         print(f"❌ {symbol} 실패 ({i}/{len(symbols)}) - {(i/len(symbols)*100):.1f}%")
@@ -268,8 +310,8 @@ def collect_stock_data_yfinance_task(**context):
     # YFinanceCollector 인스턴스 생성
     collector = YFinanceCollector()
     
-    # 병렬 수집 실행 - 전체 종목 처리 (5년 데이터)
-    result = collector.collect_all_symbols(symbols=symbols, max_workers=3, period="5y")  # 전체 종목, 3개 워커, 5년 데이터
+    # 병렬 수집 실행 - 전체 종목 처리 (5년 데이터, 안정성 우선)
+    result = collector.collect_all_symbols(symbols=symbols, max_workers=2, period="5y")  # 2개 워커로 안정성 확보
     success_count = result['success']
     
     end_time = time.time()
