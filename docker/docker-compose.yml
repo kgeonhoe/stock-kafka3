@@ -333,7 +333,7 @@ services:
         echo 'Python 파일 확인...' &&
         ls -la /app/kafka/ &&
         echo 'PySpark Kafka Consumer 시작...' &&
-        spark-submit --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 --conf spark.jars.ivy=/tmp/.ivy2 --driver-memory 1g --executor-memory 1g /app/kafka/realtime_consumer.py
+        spark-submit --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 --conf spark.jars.ivy=/tmp/.ivy2 --driver-memory 1g --executor-memory 1g /app/kafka/realtime_redis_consumer.py
       "
     restart: unless-stopped
 
