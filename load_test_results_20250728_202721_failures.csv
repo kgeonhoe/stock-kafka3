@@ -1,0 +1,15 @@
+Method,Name,Error,Occurrences
+GET,/api/stock/CRM/daily,Exception('Simulated API failure'),3
+DB,heavy_query_META,Exception('Database timeout simulation'),2
+GET,/api/stock/GOOGL/daily,Exception('Simulated API failure'),3
+DB,heavy_query_MSFT,Exception('Database timeout simulation'),1
+GET,/api/stock/TSLA/daily,Exception('Simulated API failure'),3
+GET,/api/stock/MSFT/daily,Exception('Simulated API failure'),1
+DB,heavy_query_ADBE,Exception('Database timeout simulation'),2
+GET,/api/stock/NVDA/daily,Exception('Simulated API failure'),2
+GET,/api/stock/META/daily,Exception('Simulated API failure'),1
+STRESS,rapid_request_AAPL,Exception('High load failure simulation'),148
+DB,heavy_query_AAPL,Exception('Database timeout simulation'),1
+GET,/api/stock/AMZN/daily,Exception('Simulated API failure'),1
+GET,/api/stock/NFLX/daily,Exception('Simulated API failure'),1
+DB,heavy_query_GOOGL,Exception('Database timeout simulation'),2

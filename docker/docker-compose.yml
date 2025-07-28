@@ -220,6 +220,8 @@ services:
       - ../config:/opt/airflow/config
       - airflow_logs:/opt/airflow/logs
     command: celery worker
+    mem_limit: 6g  # 메모리 제한 추가
+    memswap_limit: 8g  # 스왑 포함 메모리 제한
     restart: unless-stopped
 
   # Spark Master
