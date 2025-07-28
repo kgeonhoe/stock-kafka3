@@ -173,20 +173,22 @@ class YFinanceCollector:
                 print(f"💥 {symbol}: 수집 실패 - {error_msg}")
                 return False
     
-    def collect_all_symbols(self, symbols: List[str] = None, period: str = "2y", max_workers: int = 5) -> Dict[str, Any]:
+    def collect_all_symbols(self, symbols: List[str] = None, period: str = "2y", max_workers: int = 5, batch_size: int = 50) -> Dict[str, Any]:
         """
-        전체 종목 병렬 수집 (중복 데이터 스킵)
+        전체 종목 배치별 병렬 수집 (메모리 최적화)
         
         Args:
             symbols: 수집할 종목 리스트 (None이면 DB에서 조회)
             period: 수집 기간 
-            max_workers: 병렬 처리 수
+            max_workers: 병렬 처리 수 (메모리 절약을 위해 기본값 2)
+            batch_size: 배치 크기 (메모리 절약을 위해 기본값 50)
             
         Returns:
             수집 결과 통계
         """
         import concurrent.futures
         import time
+        import gc  # 가비지 컬렉션
         
         # 심볼 목록 준비
         if symbols is None:
@@ -195,63 +197,87 @@ class YFinanceCollector:
                 print("❌ 활성 심볼이 없습니다.")
                 return {'error': 'No active symbols found'}
         
-        print(f"� {len(symbols)}개 종목 병렬 수집 시작 (기존 데이터 스킵)")
-        print(f"⚙️ 설정: 최대 {max_workers}개 워커, 수집 기간: {period}")
+        total_symbols = len(symbols)
+        print(f"🚀 {total_symbols}개 종목 배치별 병렬 수집 시작 (메모리 최적화)")
+        print(f"⚙️ 설정: 최대 {max_workers}개 워커, 배치 크기: {batch_size}, 수집 기간: {period}")
         
         start_time = time.time()
-        success_count = 0
-        fail_count = 0
-        skip_count = 0  # 중복 데이터로 스킵된 종목 수
+        total_success = 0
+        total_fail = 0
         
-        # 병렬 처리
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 모든 심볼에 대해 future 생성
-            future_to_symbol = {
-                executor.submit(self.collect_stock_data, symbol, period): symbol 
-                for symbol in symbols
-            }
+        # 배치별로 처리
+        for batch_start in range(0, total_symbols, batch_size):
+            batch_end = min(batch_start + batch_size, total_symbols)
+            batch_symbols = symbols[batch_start:batch_end]
+            batch_num = (batch_start // batch_size) + 1
+            total_batches = (total_symbols + batch_size - 1) // batch_size
             
-            # 완료된 작업들 처리
-            for i, future in enumerate(concurrent.futures.as_completed(future_to_symbol), 1):
-                symbol = future_to_symbol[future]
+            print(f"\n📦 배치 {batch_num}/{total_batches}: {len(batch_symbols)}개 종목 처리 중...")
+            batch_start_time = time.time()
+            
+            success_count = 0
+            fail_count = 0
+            
+            # 병렬 처리
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 배치 내 심볼들에 대해 future 생성
+                future_to_symbol = {
+                    executor.submit(self.collect_stock_data, symbol, period): symbol 
+                    for symbol in batch_symbols
+                }
                 
-                try:
-                    success = future.result()
-                    if success:
-                        success_count += 1
-                        progress_msg = f"✅ {symbol} 성공 ({i}/{len(symbols)}) - {(i/len(symbols)*100):.1f}%"
-                        print(progress_msg)
+                # 완료된 작업들 처리
+                for i, future in enumerate(concurrent.futures.as_completed(future_to_symbol), 1):
+                    symbol = future_to_symbol[future]
+                    
+                    try:
+                        success = future.result()
+                        if success:
+                            success_count += 1
+                        else:
+                            fail_count += 1
                         
-                        # 10개마다 추가 진행 상황 출력
-                        if i % 10 == 0:
-                            print(f"📈 진행 상황: {i}/{len(symbols)} 완료 ({success_count}개 성공, {fail_count}개 실패)")
-                            import sys
-                            sys.stdout.flush()  # 로그 즉시 출력
-                    else:
+                        # 진행 상황 표시 (5개마다)
+                        if i % 5 == 0:
+                            print(f"  📈 배치 진행: {i}/{len(batch_symbols)} 완료 ({success_count}개 성공)")
+                            
+                    except Exception as e:
                         fail_count += 1
-                        print(f"❌ {symbol} 실패 ({i}/{len(symbols)}) - {(i/len(symbols)*100):.1f}%")
-                        
-                except Exception as e:
-                    fail_count += 1
-                    print(f"💥 {symbol} 예외 발생: {e} ({i}/{len(symbols)})")
+                        print(f"💥 {symbol} 예외 발생: {e}")
+            
+            batch_duration = time.time() - batch_start_time
+            total_success += success_count
+            total_fail += fail_count
+            
+            print(f"✅ 배치 {batch_num} 완료: {success_count}/{len(batch_symbols)} 성공 ({batch_duration:.1f}초)")
+            print(f"📊 누적 진행: {batch_end}/{total_symbols} 종목 ({total_success}개 성공, {total_fail}개 실패)")
+            
+            # 메모리 정리 (배치 간)
+            gc.collect()
+            
+            # 배치 간 휴식 (API 제한 방지 및 메모리 안정화)
+            if batch_end < total_symbols:
+                print(f"� 배치 간 휴식 (5초)...")
+                time.sleep(5)
         
         elapsed_time = time.time() - start_time
         
         result = {
-            'total': len(symbols),
-            'success': success_count,
-            'fail': fail_count,
-            'skip': skip_count,
+            'total': total_symbols,
+            'success': total_success,
+            'fail': total_fail,
             'elapsed_time': round(elapsed_time, 2),
-            'avg_time_per_symbol': round(elapsed_time / len(symbols), 2),
+            'avg_time_per_symbol': round(elapsed_time / total_symbols, 2),
+            'batch_size': batch_size,
+            'max_workers': max_workers,
             'timestamp': datetime.now().isoformat()
         }
         
-        print(f"🎉 병렬 데이터 수집 완료!")
-        print(f"📊 결과: 총 {result['total']}개, 성공 {result['success']}개, 실패 {result['fail']}개")
+        print(f"\n🎉 배치별 병렬 데이터 수집 완료!")
+        print(f"📊 최종 결과: 총 {result['total']}개, 성공 {result['success']}개, 실패 {result['fail']}개")
         print(f"⚡ 처리 시간: {result['elapsed_time']}초 (평균 {result['avg_time_per_symbol']}초/종목)")
-        print(f"🚀 병렬 처리 효과: {max_workers}배 속도 향상!")
-        print(f"💡 중복 데이터 스킵으로 효율성 향상!")
+        print(f"� 배치 설정: {batch_size}개씩 {max_workers}병렬 처리")
+        print(f"💡 메모리 최적화로 안정성 향상!")
         
         return result
     
@@ -310,23 +336,26 @@ def collect_stock_data_yfinance_task(**context):
     # YFinanceCollector 인스턴스 생성
     collector = YFinanceCollector()
     
-    # 병렬 수집 실행 - 전체 종목 처리 (5년 데이터, 안정성 우선)
-    result = collector.collect_all_symbols(symbols=symbols, max_workers=2, period="5y")  # 2개 워커로 안정성 확보
+    # 병렬 수집 실행 - 메모리 최적화로 배치 처리 (5년 데이터, 안정성 우선)
+    result = collector.collect_all_symbols(symbols=symbols, max_workers=2, period="5y", batch_size=50)  # 배치 크기 50, 2개 워커로 안정성 확보
     success_count = result['success']
     
     end_time = time.time()
     duration = end_time - start_time
     
-    print(f"✅ yfinance 병렬 수집 완료! (5년 데이터)")
+    print(f"✅ yfinance 배치별 병렬 수집 완료! (5년 데이터)")
     print(f"📊 처리 결과: {success_count}/{len(symbols)}개 성공")
     print(f"⏱️  총 소요시간: {duration:.2f}초 (평균 {duration/len(symbols):.2f}초/종목)")
     print(f"🚄 성능: {len(symbols)/duration:.2f} 종목/초")
     print(f"🎯 전체 NASDAQ 종목 {len(symbols)}개 처리 완료! (5년 히스토리)")
+    print(f"🔧 메모리 최적화: 50개씩 배치 처리로 안정성 향상")
     
     return {
         'total_symbols': len(symbols),
         'success_count': success_count,
         'duration': duration,
         'throughput': len(symbols)/duration,
+        'batch_size': 50,
+        'max_workers': 2,
         'result_details': result
     }
