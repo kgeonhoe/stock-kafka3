@@ -19,7 +19,12 @@ from pyspark.sql.types import StructType, StructField, StringType, DoubleType, I
 
 from common.postgresql_manager import PostgreSQLManager
 from common.slack_notifier import SlackNotifier
+from common.database import DuckDBManager
+from common.redis_manager import RedisManager
 from config.kafka_config import KafkaConfig
+import redis
+import pandas as pd
+import numpy as np
 
 class RealtimeStockConsumer:
     """실시간 주식 데이터 컨슈머"""
