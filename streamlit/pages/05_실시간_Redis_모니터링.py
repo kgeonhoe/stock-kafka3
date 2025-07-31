@@ -49,6 +49,24 @@ st.set_page_config(
     layout="wide"
 )
 
+# 다크 테마 CSS 적용
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #0e1117;
+        color: #fafafa;
+    }
+    .stDataFrame {
+        background-color: #262730;
+    }
+    .stMetric {
+        background-color: #262730;
+        padding: 10px;
+        border-radius: 5px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("📡 실시간 Redis 데이터 모니터링")
 
 # 현재 한국 시간 표시
@@ -77,7 +95,85 @@ try:
         
         # 활성 신호 조회
         try:
-            active_signals = redis_client.get_active_signals()
+            # Redis에서 직접 기술적 지표 데이터를 조회하여 신호 생성
+            indicators_keys = redis_client.redis_client.keys("indicators:*")
+            active_signals = []
+            
+            for key in indicators_keys:
+                symbol = key.replace("indicators:", "")
+                indicator_data_str = redis_client.redis_client.get(key)
+                
+                if indicator_data_str:
+                    try:
+                        indicator_data = json.loads(indicator_data_str)
+                        
+                        # 실시간 가격 데이터 조회
+                        realtime_key = f"realtime:{symbol}"
+                        realtime_data_str = redis_client.redis_client.get(realtime_key)
+                        current_price = None
+                        
+                        if realtime_data_str:
+                            realtime_data = json.loads(realtime_data_str)
+                            current_price = realtime_data.get('price')
+                        
+                        # 신호 조건 확인
+                        rsi = indicator_data.get('rsi')
+                        macd = indicator_data.get('macd')
+                        macd_signal = indicator_data.get('macd_signal')
+                        bb_upper = indicator_data.get('bb_upper')
+                        signals = indicator_data.get('signals', [])
+                        
+                        detected_signals = []
+                        
+                        # RSI 기반 신호
+                        if rsi and rsi > 70:
+                            detected_signals.append({
+                                'symbol': symbol,
+                                'signal_type': 'rsi_overbought',
+                                'trigger_price': current_price or indicator_data.get('current_price'),
+                                'current_price': current_price,
+                                'rsi_value': rsi,
+                                'trigger_time': indicator_data.get('calculation_time'),
+                                'strength': abs(rsi - 70)
+                            })
+                        elif rsi and rsi < 30:
+                            detected_signals.append({
+                                'symbol': symbol,
+                                'signal_type': 'rsi_oversold',
+                                'trigger_price': current_price or indicator_data.get('current_price'),
+                                'current_price': current_price,
+                                'rsi_value': rsi,
+                                'trigger_time': indicator_data.get('calculation_time'),
+                                'strength': abs(30 - rsi)
+                            })
+                        
+                        # MACD 기반 신호
+                        if macd and macd_signal and macd > macd_signal:
+                            detected_signals.append({
+                                'symbol': symbol,
+                                'signal_type': 'macd_bullish',
+                                'trigger_price': current_price or indicator_data.get('current_price'),
+                                'current_price': current_price,
+                                'macd_value': macd,
+                                'trigger_time': indicator_data.get('calculation_time'),
+                                'strength': abs(macd - macd_signal)
+                            })
+                        
+                        # 볼린저 밴드 신호 (신호 리스트에서 확인)
+                        if signals and any('볼린저' in str(signal) for signal in signals):
+                            detected_signals.append({
+                                'symbol': symbol,
+                                'signal_type': 'bollinger_upper_touch',
+                                'trigger_price': current_price or indicator_data.get('current_price'),
+                                'current_price': current_price,
+                                'trigger_time': indicator_data.get('calculation_time'),
+                                'strength': 5  # 기본값
+                            })
+                        
+                        active_signals.extend(detected_signals)
+                        
+                    except json.JSONDecodeError:
+                        continue
             
             if active_signals:
                 st.success(f"🎯 현재 활성 신호: {len(active_signals)}개")
@@ -87,23 +183,14 @@ try:
                 
                 for signal in active_signals:
                     symbol = signal['symbol']
+                    trigger_price = signal.get('trigger_price', 0)
+                    current_price = signal.get('current_price', trigger_price)
                     
-                    # 현재 가격 조회 (실시간 분석 데이터에서)
-                    current_analysis = redis_client.get_realtime_analysis(symbol)
-                    current_price = None
-                    
-                    if current_analysis:
-                        current_price = current_analysis['current_price']
-                        
-                        # 성과 업데이트
-                        updated_signal = redis_client.update_signal_performance(
-                            symbol=symbol,
-                            trigger_time=signal['trigger_time'],
-                            current_price=current_price
-                        )
-                        
-                        if updated_signal:
-                            signal = updated_signal
+                    # 성과 계산
+                    if trigger_price and current_price and trigger_price > 0:
+                        price_change_pct = ((current_price - trigger_price) / trigger_price) * 100
+                    else:
+                        price_change_pct = 0
                     
                     # 신호 타입 한글 변환
                     signal_type_names = {
@@ -114,14 +201,13 @@ try:
                     }
                     
                     # 성과 색상 결정
-                    change_pct = signal.get('price_change_pct', 0)
-                    if change_pct > 2:
+                    if price_change_pct > 2:
                         performance_icon = "🟢"
                         performance_color = "green"
-                    elif change_pct > 0:
+                    elif price_change_pct > 0:
                         performance_icon = "🔵"
                         performance_color = "blue"
-                    elif change_pct < -2:
+                    elif price_change_pct < -2:
                         performance_icon = "🔴"
                         performance_color = "red"
                     else:
@@ -131,12 +217,13 @@ try:
                     signal_performance.append({
                         'Symbol': signal['symbol'],
                         'Signal': signal_type_names.get(signal['signal_type'], signal['signal_type']),
-                        'Trigger Price': f"${signal['trigger_price']:.2f}",
-                        'Current Price': f"${signal.get('current_price', 0):.2f}" if signal.get('current_price') else "N/A",
-                        'Change': f"{change_pct:+.2f}%" if change_pct != 0 else "0.00%",
+                        'Trigger Price': f"${trigger_price:.2f}" if trigger_price else "N/A",
+                        'Current Price': f"${current_price:.2f}" if current_price else "N/A",
+                        'Change': f"{price_change_pct:+.2f}%" if price_change_pct != 0 else "0.00%",
                         'Performance': performance_icon,
-                        'Trigger Time': format_korean_time(signal['trigger_time']),
-                        '_change_pct': change_pct,
+                        'Trigger Time': format_korean_time(signal.get('trigger_time', 'N/A')),
+                        'Strength': f"{signal.get('strength', 0):.2f}",
+                        '_change_pct': price_change_pct,
                         '_color': performance_color
                     })
                 
@@ -169,23 +256,26 @@ try:
                     
                     # 성과에 따른 색상 코딩을 위한 스타일링
                     df = pd.DataFrame(signal_performance)
-                    display_df = df[['Symbol', 'Signal', 'Trigger Price', 'Current Price', 'Change', 'Performance', 'Trigger Time']]
+                    display_df = df[['Symbol', 'Signal', 'Trigger Price', 'Current Price', 'Change', 'Performance', 'Strength', 'Trigger Time']]
                     
-                    # 조건부 포맷팅
+                    # 조건부 포맷팅 - 다크 테마 적용
                     def highlight_performance(row):
-                        if row['_change_pct'] > 2:
-                            return ['background-color: #d4edda'] * len(row)
-                        elif row['_change_pct'] > 0:
-                            return ['background-color: #cce5ff'] * len(row)
-                        elif row['_change_pct'] < -2:
-                            return ['background-color: #f8d7da'] * len(row)
+                        # display_df 컬럼 수에 맞춰 스타일 적용
+                        change_pct = df.loc[row.name, '_change_pct']
+                        
+                        if change_pct > 2:
+                            color = 'background-color: #1e3d2f; color: #7bc96f;'  # 진한 녹색 배경 + 밝은 녹색 텍스트
+                        elif change_pct > 0:
+                            color = 'background-color: #1e2c3d; color: #70a7ff;'  # 진한 파란색 배경 + 밝은 파란색 텍스트
+                        elif change_pct < -2:
+                            color = 'background-color: #3d1e1e; color: #ff7070;'  # 진한 빨간색 배경 + 밝은 빨간색 텍스트
                         else:
-                            return ['background-color: #fff3cd'] * len(row)
+                            color = 'background-color: #3d3d1e; color: #ffff70;'  # 진한 황색 배경 + 밝은 황색 텍스트
+                        
+                        # display_df의 컬럼 수만큼 반환
+                        return [color] * len(display_df.columns)
                     
-                    styled_df = display_df.style.apply(
-                        lambda row: highlight_performance(df.iloc[row.name]), 
-                        axis=1
-                    )
+                    styled_df = display_df.style.apply(highlight_performance, axis=1)
                     
                     st.dataframe(styled_df, use_container_width=True, hide_index=True)
                     
@@ -263,22 +353,44 @@ try:
         st.markdown("### 🎯 관심종목 데이터 상태")
         
         try:
-            watchlist_keys = redis_client.redis_client.keys("watchlist_data:*")
-            realtime_keys = redis_client.redis_client.keys("realtime_analysis:*")
+            # 실제 키 패턴에 맞게 수정
+            watchlist_keys = redis_client.redis_client.keys("watchlist:*")
+            realtime_keys = redis_client.redis_client.keys("realtime:*")
+            indicators_keys = redis_client.redis_client.keys("indicators:*")
             
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("Redis 관심종목 데이터", len(watchlist_keys))
+                st.metric("관심종목 데이터", len(watchlist_keys))
             
             with col2:
-                st.metric("실시간 분석 데이터", len(realtime_keys))
+                st.metric("실시간 데이터", len(realtime_keys))
+            
+            with col3:
+                st.metric("기술적 지표", len(indicators_keys))
                 
             if watchlist_keys:
                 st.success("✅ 관심종목 데이터가 Redis에 로딩되어 있습니다.")
+                
+                # 관심종목 데이터 샘플 표시
+                sample_data = []
+                for key in watchlist_keys[:5]:
+                    symbol = key.replace("watchlist:", "")
+                    watchlist_data_str = redis_client.redis_client.hgetall(key)
+                    if watchlist_data_str:
+                        sample_data.append({
+                            'Symbol': symbol,
+                            'Status': watchlist_data_str.get('status', 'N/A'),
+                            'Added Date': format_korean_time(watchlist_data_str.get('added_date', 'N/A')),
+                            'Notes': watchlist_data_str.get('notes', 'N/A')
+                        })
+                
+                if sample_data:
+                    st.markdown("#### 📋 관심종목 샘플 데이터")
+                    st.dataframe(pd.DataFrame(sample_data), use_container_width=True, hide_index=True)
             else:
                 st.warning("⚠️ 관심종목 데이터를 Redis에 로딩해야 합니다.")
-                st.code("python /app/scripts/load_watchlist_to_redis.py")
+                st.info("💡 Redis 컨슈머가 실행되면 자동으로 관심종목 데이터가 로딩됩니다.")
         
         except Exception as e:
             st.error(f"❌ 관심종목 상태 확인 오류: {e}")
@@ -294,27 +406,33 @@ try:
             
             # Redis에서 실시간 가격 데이터 조회
             try:
-                # 모든 실시간 가격 키 조회
-                price_keys = redis_client.redis_client.keys("realtime_price:*")
+                # 모든 실시간 가격 키 조회 (실제 키 패턴: realtime:SYMBOL)
+                price_keys = redis_client.redis_client.keys("realtime:*")
                 
                 if price_keys:
                     prices_data = []
                     for key in price_keys[:10]:  # 최대 10개만 표시
-                        symbol = key.replace("realtime_price:", "")
-                        price_data = redis_client.get_realtime_price(symbol)
+                        symbol = key.replace("realtime:", "")
                         
-                        if price_data:
-                            prices_data.append({
-                                'Symbol': symbol,
-                                'Price': price_data.get('price', 'N/A'),
-                                'Change': price_data.get('change', 'N/A'),
-                                'Volume': price_data.get('volume', 'N/A'),
-                                'Timestamp': format_korean_time(price_data.get('timestamp', 'N/A'))
-                            })
+                        # Redis에서 JSON 형태로 저장된 데이터 조회
+                        price_data_str = redis_client.redis_client.get(key)
+                        if price_data_str:
+                            try:
+                                price_data = json.loads(price_data_str)
+                                prices_data.append({
+                                    'Symbol': symbol,
+                                    'Price': f"${price_data.get('price', 'N/A'):.2f}" if isinstance(price_data.get('price'), (int, float)) else 'N/A',
+                                    'Source': price_data.get('source', 'N/A'),
+                                    'Change': price_data.get('change', 'N/A'),
+                                    'Volume': price_data.get('volume', 'N/A'),
+                                    'Timestamp': format_korean_time(price_data.get('timestamp', 'N/A'))
+                                })
+                            except json.JSONDecodeError:
+                                continue
                     
                     if prices_data:
                         df = pd.DataFrame(prices_data)
-                        st.dataframe(df, use_container_width=True)
+                        st.dataframe(df, use_container_width=True, hide_index=True)
                     else:
                         st.info("실시간 가격 데이터가 없습니다.")
                 else:
@@ -328,26 +446,33 @@ try:
             
             # Redis에서 기술적 지표 데이터 조회
             try:
-                indicators_keys = redis_client.redis_client.keys("technical_indicator:*")
+                # 실제 키 패턴: indicators:SYMBOL
+                indicators_keys = redis_client.redis_client.keys("indicators:*")
                 
                 if indicators_keys:
                     indicators_data = []
                     for key in indicators_keys[:10]:
-                        symbol = key.replace("technical_indicator:", "")
-                        indicator_data = redis_client.get_technical_indicators(symbol)
+                        symbol = key.replace("indicators:", "")
                         
-                        if indicator_data:
-                            indicators_data.append({
-                                'Symbol': symbol,
-                                'RSI': indicator_data.get('rsi', 'N/A'),
-                                'MACD': indicator_data.get('macd', 'N/A'),
-                                'BB_Position': indicator_data.get('bb_position', 'N/A'),
-                                'Signal': indicator_data.get('signal', 'N/A')
-                            })
+                        # Redis에서 JSON 형태로 저장된 데이터 조회
+                        indicator_data_str = redis_client.redis_client.get(key)
+                        if indicator_data_str:
+                            try:
+                                indicator_data = json.loads(indicator_data_str)
+                                indicators_data.append({
+                                    'Symbol': symbol,
+                                    'RSI': f"{indicator_data.get('rsi', 'N/A'):.2f}" if isinstance(indicator_data.get('rsi'), (int, float)) else 'N/A',
+                                    'MACD': f"{indicator_data.get('macd', 'N/A'):.4f}" if isinstance(indicator_data.get('macd'), (int, float)) else 'N/A',
+                                    'SMA 5': f"{indicator_data.get('sma_5', 'N/A'):.2f}" if isinstance(indicator_data.get('sma_5'), (int, float)) else 'N/A',
+                                    'Sentiment': indicator_data.get('overall_sentiment', 'N/A'),
+                                    'Strength': indicator_data.get('strength', 'N/A')
+                                })
+                            except json.JSONDecodeError:
+                                continue
                     
                     if indicators_data:
                         df = pd.DataFrame(indicators_data)
-                        st.dataframe(df, use_container_width=True)
+                        st.dataframe(df, use_container_width=True, hide_index=True)
                     else:
                         st.info("기술적 지표 데이터가 없습니다.")
                 else:
@@ -356,7 +481,7 @@ try:
             except Exception as e:
                 st.error(f"기술적 지표 데이터 조회 오류: {e}")
     
-    with tab2:
+    with tab3:
         st.subheader("🔧 Redis 서버 상태")
         
         # Redis 정보 조회
@@ -394,27 +519,36 @@ try:
         except Exception as e:
             st.error(f"Redis 상태 조회 오류: {e}")
     
-    with tab3:
+    with tab4:
         st.subheader("📈 캐시 성능 통계")
         
         try:
-            # 캐시 성능 메트릭
-            stats = redis_manager.get_cache_stats()
+            # Redis 기본 정보에서 통계 계산
+            info = redis_client.redis_client.info()
+            
+            # 기본 메트릭 계산
+            total_commands = info.get('total_commands_processed', 0)
+            keyspace_hits = info.get('keyspace_hits', 0)
+            keyspace_misses = info.get('keyspace_misses', 0)
+            
+            # 히트율 계산
+            total_requests = keyspace_hits + keyspace_misses
+            hit_rate = (keyspace_hits / total_requests) if total_requests > 0 else 0
             
             col1, col2 = st.columns(2)
             
             with col1:
-                st.metric("캐시 히트율", f"{stats.get('hit_rate', 0):.1%}")
-                st.metric("총 요청", stats.get('total_requests', 0))
+                st.metric("캐시 히트율", f"{hit_rate:.1%}")
+                st.metric("총 요청", total_requests)
             
             with col2:
-                st.metric("캐시 미스", stats.get('misses', 0))
-                st.metric("평균 응답시간", f"{stats.get('avg_response_time', 0):.3f}ms")
+                st.metric("캐시 미스", keyspace_misses)
+                st.metric("초당 명령어", info.get('instantaneous_ops_per_sec', 0))
             
             # 캐시 타입별 통계
             st.markdown("### 📊 캐시 타입별 사용량")
             
-            cache_types = ['realtime_price', 'technical_indicator', 'market_data', 'user_session']
+            cache_types = ['realtime', 'indicators', 'watchlist', 'signal_trigger']
             type_stats = []
             
             for cache_type in cache_types:
@@ -422,7 +556,7 @@ try:
                 type_stats.append({
                     'Cache Type': cache_type,
                     'Key Count': len(keys),
-                    'Memory Usage': 'N/A'  # Redis에서 메모리 사용량 계산 복잡
+                    'Status': '✅ Active' if len(keys) > 0 else '❌ Empty'
                 })
             
             df = pd.DataFrame(type_stats)
@@ -431,7 +565,7 @@ try:
         except Exception as e:
             st.error(f"캐시 통계 조회 오류: {e}")
     
-    with tab4:
+    with tab5:
         st.subheader("🔑 Redis 키 관리")
         
         # 키 검색

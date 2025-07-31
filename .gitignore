@@ -1,6 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
 venv/
 .env
-/venv/
-*pycache*
-/checkpoints/
-*data*
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Data files and databases
+*data*/
+data/
+*.csv
+*.json
+*.parquet
+*.db
+*.sqlite
+*.h5
+*.html
+
+# Checkpoints and cache
+*checkpoints*/
+checkpoints/
+.checkpoints/
+*.checkpoint
+
+# Logs and reports
+*.log
+logs/
+*.out
+load_test_report_*.html
+load_test_results_*.csv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Archive files
+*.zip
+*.tar.gz
+*.tar
+*.rar
+
+# Test files (특별히 제외하고 싶은 경우)
+# test_*.py

@@ -42,6 +42,17 @@ class TechnicalIndicatorCalculator:
             과거 일봉 데이터 DataFrame 또는 None
         """
         try:
+            # 테이블 존재 확인 (DuckDB 방식)
+            try:
+                tables = self.conn.execute("SHOW TABLES").fetchall()
+                table_names = [table[0].lower() for table in tables]
+                if 'stock_data' not in table_names:
+                    print(f"⚠️ {symbol}: stock_data 테이블 없음 (사용 가능한 테이블: {table_names})")
+                    return None
+            except Exception as table_error:
+                print(f"⚠️ {symbol}: 테이블 확인 실패 - {table_error}")
+                return None
+            
             # 최근 N일간 데이터 조회
             query = """
                 SELECT date, open, high, low, close, volume

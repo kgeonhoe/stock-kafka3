@@ -33,6 +33,24 @@ def process_realtime_data_with_spark():
         # Redis 연결 테스트
         if redis_manager.redis_client.ping():
             print("✅ Redis 연결 성공")
+            
+            # 관심종목 데이터 초기 로딩
+            try:
+                watchlist_symbols = ['AAPL', 'GOOGL', 'NVDA', 'TSLA', 'MSFT', 'META', 'AMZN', 'NFLX', 'ADBE', 'CRM']
+                for symbol in watchlist_symbols:
+                    watchlist_data = {
+                        'symbol': symbol,
+                        'added_date': datetime.now().isoformat(),
+                        'status': 'active',
+                        'alerts_enabled': 'true',  # Redis는 문자열로 저장
+                        'price_target': '',  # None 대신 빈 문자열 사용
+                        'notes': f'{symbol} 관심종목'
+                    }
+                    redis_manager.redis_client.hset(f"watchlist:{symbol}", mapping=watchlist_data)
+                print(f"✅ 관심종목 데이터 로딩 완료: {len(watchlist_symbols)}개")
+            except Exception as e:
+                print(f"❌ 관심종목 데이터 로딩 실패: {e}")
+                
         else:
             print("❌ Redis 연결 실패")
             return
@@ -91,10 +109,18 @@ def process_realtime_data_with_spark():
                         # 메시지 파싱
                         message_data = json.loads(row.message)
                         symbol = message_data.get('symbol')
-                        price = message_data.get('price')
-                        source = message_data.get('source', 'unknown')
                         
-                        if not symbol or not price:
+                        # 데이터 소스별 필드명 통합 처리
+                        price = message_data.get('price')
+                        if price is None:
+                            price = message_data.get('current_price')  # YFinance용
+                        
+                        # 소스 정보 통합
+                        source = message_data.get('source', 'unknown')
+                        if source == 'unknown':
+                            source = message_data.get('data_source', 'unknown')
+                        
+                        if not symbol or price is None:
                             print(f"⚠️ 필수 데이터 누락: symbol={symbol}, price={price}")
                             continue
                         
@@ -110,13 +136,22 @@ def process_realtime_data_with_spark():
                             'kafka_timestamp': row.kafka_timestamp.isoformat() if row.kafka_timestamp else None,
                             'volume': message_data.get('volume'),
                             'change': message_data.get('change'),
-                            'change_percent': message_data.get('change_percent')
+                            'change_percent': message_data.get('change_percent'),
+                            # YFinance 추가 필드들
+                            'previous_close': message_data.get('previous_close'),
+                            'open_price': message_data.get('open_price'),
+                            'day_high': message_data.get('day_high'),
+                            'day_low': message_data.get('day_low'),
+                            'change_rate': message_data.get('change_rate')
                         }
                         
                         # Redis 저장
                         success = redis_manager.store_realtime_data(symbol, redis_data)
                         if success:
                             processed_count += 1
+                            print(f"  ✅ Redis 저장 성공: {symbol}")
+                        else:
+                            print(f"  ❌ Redis 저장 실패: {symbol}")
                         
                         # 2. 기술적 지표 계산 (과거 데이터 + 현재 가격)
                         try:
@@ -135,9 +170,8 @@ def process_realtime_data_with_spark():
                                 macd = indicators.get('macd')
                                 sentiment = indicators.get('overall_sentiment', 'neutral')
                                 strength = indicators.get('strength', 0)
-                                
-                                print(f"  📈 {symbol} 지표: RSI={rsi}, MACD={macd:.4f if macd else None}, "
-                                      f"신호={sentiment}({strength})")
+                                macd_str = f"{macd:.4f}" if macd is not None else "None"
+                                print(f"  📈 {symbol} 지표: RSI={rsi}, MACD={macd_str}, 신호={sentiment}({strength})")
                                 
                                 # 중요한 매매 신호만 출력
                                 signals = indicators.get('signals', [])

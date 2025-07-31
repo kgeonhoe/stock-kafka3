@@ -13,11 +13,11 @@ pip install -r requirements-airflow.txt
 
 # 1. Kafka 서비스 상태 확인
 echo "🔍 Kafka 서비스 상태 확인..."
-if docker-compose ps kafka | grep -q "Up"; then
+if docker compose ps kafka | grep -q "Up"; then
     echo "✅ Kafka 서비스 실행 중"
 else
     echo "⚠️ Kafka 서비스를 시작합니다..."
-    docker-compose up -d kafka
+    docker compose up -d kafka
     sleep 10
 fi
 
