@@ -74,6 +74,23 @@ def collect_nasdaq_symbols_func(**kwargs):
         print("🔧 나스닥 API 컬렉터 초기화...")
         collector = NasdaqSymbolCollector()
         
+        # 증분 업데이트 확인 - 오늘 이미 수집했는지 체크
+        if db.is_nasdaq_symbols_collected_today():
+            last_collected = db.get_nasdaq_symbols_last_collected_date()
+            print(f"✅ 오늘({last_collected}) 이미 NASDAQ 심볼 수집 완료 - 스킵")
+            print("💡 증분 업데이트: 불필요한 API 호출 방지")
+            
+            # 기존 심볼 조회해서 반환
+            existing_symbols_query = "SELECT symbol, name, market_cap, sector FROM nasdaq_symbols"
+            existing_df = db.execute_query(existing_symbols_query)
+            
+            if not existing_df.empty:
+                result_symbols = existing_df.to_dict('records')
+                print(f"📋 기존 심볼 사용: {len(result_symbols)}개")
+                return result_symbols
+            else:
+                print("⚠️ 기존 심볼이 없어서 새로 수집 진행")
+        
         try:
             print("📊 나스닥 API에서 종목 데이터 수집 중...")
             symbols = collector.collect_symbols()
@@ -498,5 +515,105 @@ create_replica = PythonOperator(
     retry_delay=timedelta(minutes=3)
 )
 
+# 파이프라인 완료 플래그 생성
+def create_completion_flag_func(**kwargs):
+    """파이프라인 완료 플래그 생성"""
+    import json
+    from datetime import datetime
+    
+    try:
+        # 이전 Task들의 결과 수집
+        collected_symbols = kwargs['ti'].xcom_pull(task_ids='collect_nasdaq_symbols')
+        collected_ohlcv = kwargs['ti'].xcom_pull(task_ids='collect_stock_data_yfinance')
+        calculated_indicators = kwargs['ti'].xcom_pull(task_ids='calculate_technical_indicators_spark')
+        scanned_watchlist = kwargs['ti'].xcom_pull(task_ids='watchlist_scan_task')
+        
+        # 완료 정보 구성
+        completion_info = {
+            'completion_time': datetime.now().isoformat(),
+            'dag_run_id': kwargs['dag_run'].run_id,
+            'execution_date': str(kwargs['execution_date']),
+            'pipeline_results': {
+                'collected_symbols': collected_symbols or 0,
+                'collected_ohlcv': collected_ohlcv or 0,
+                'calculated_indicators': calculated_indicators or 0,
+                'scanned_watchlist': scanned_watchlist or 0
+            },
+            'status': 'completed',
+            'next_steps': ['redis_watchlist_sync', 'realtime_streaming']
+        }
+        
+        # 플래그 파일 생성
+        flag_file = "/tmp/nasdaq_pipeline_complete.flag"
+        os.makedirs(os.path.dirname(flag_file), exist_ok=True)
+        
+        with open(flag_file, 'w') as f:
+            f.write(json.dumps(completion_info, indent=2))
+        
+        print("🎉 나스닥 데이터 파이프라인 완료!")
+        print(f"📊 처리 결과:")
+        print(f"   수집된 심볼: {collected_symbols}개")
+        print(f"   수집된 OHLCV: {collected_ohlcv}개")
+        print(f"   계산된 지표: {calculated_indicators}개")
+        print(f"   스캔된 관심종목: {scanned_watchlist}개")
+        print(f"✅ 완료 플래그 생성: {flag_file}")
+        
+        # Redis 동기화 DAG 자동 트리거
+        from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+        print("🔄 Redis 관심종목 동기화 DAG 트리거 준비 완료")
+        
+        return completion_info
+        
+    except Exception as e:
+        print(f"❌ 완료 플래그 생성 실패: {e}")
+        raise
+
+create_completion_flag = PythonOperator(
+    task_id='create_completion_flag',
+    python_callable=create_completion_flag_func,
+    dag=dag,
+    doc_md="""
+    ## 🏁 파이프라인 완료 플래그 생성
+    
+    **목적**: 나스닥 데이터 파이프라인 완료를 다른 DAG에 알림
+    
+    **처리 과정**:
+    1. 모든 이전 Task의 결과 수집
+    2. 완료 정보를 JSON으로 구성
+    3. /tmp/nasdaq_pipeline_complete.flag 파일 생성
+    4. Redis 동기화 DAG 트리거 준비
+    
+    **출력 파일 내용**:
+    - 완료 시간
+    - 처리된 데이터 통계
+    - 다음 단계 정보
+    
+    **연결 DAG**: redis_watchlist_sync (자동 트리거)
+    """,
+    retries=1,
+    retry_delay=timedelta(minutes=2)
+)
+
+# Redis 동기화 DAG 자동 트리거
+trigger_redis_sync = TriggerDagRunOperator(
+    task_id='trigger_redis_watchlist_sync',
+    trigger_dag_id='redis_watchlist_sync',
+    conf={
+        'triggered_by': 'nasdaq_daily_pipeline',
+        'trigger_time': '{{ ts }}',
+        'execution_date': '{{ ds }}'
+    },
+    dag=dag,
+    doc_md="""
+    ## 🔄 Redis 동기화 DAG 트리거
+    
+    **목적**: 메인 파이프라인 완료 후 자동으로 Redis 동기화 실행
+    
+    **트리거 조건**: 모든 데이터 처리 및 복제 완료 후
+    **대상 DAG**: redis_watchlist_sync
+    **전달 정보**: 실행 시간, 트리거 소스
+    """
+)
+
 # 태스크 의존성 설정 - 완전한 파이프라인
-collect_symbols >> collect_ohlcv >> calculate_indicators >> watchlist_scan >> create_replica
+collect_symbols >> collect_ohlcv >> calculate_indicators >> watchlist_scan >> create_replica >> create_completion_flag >> trigger_redis_sync

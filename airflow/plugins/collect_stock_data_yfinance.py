@@ -4,7 +4,7 @@
 import yfinance as yf
 import pandas as pd
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Dict, Any, List
 import concurrent.futures
 import time
@@ -27,57 +27,71 @@ class YFinanceCollector:
     
     def collect_stock_data(self, symbol: str, period: str = "5y") -> bool:
         """
-        개별 종목 주가 데이터 수집 (중복 날짜 스킵)
+        개별 종목 주가 데이터 수집 (증분 업데이트 방식)
         
         Args:
             symbol: 종목 심볼 (예: AAPL)
-            period: 수집 기간 (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
+            period: 수집 기간 (신규 종목용, 기존 종목은 증분)
             
         Returns:
             수집 성공 여부
         """
         import time
         import random
-        from datetime import date, timedelta
         
         try:
-            # 1. 기존 데이터 확인
-            existing_dates = self.db.get_existing_dates(symbol, days_back=1825)  # 5년간 데이터 확인 (365*5)
+            # API 호출 제한 방지를 위한 지연
+            time.sleep(random.uniform(1.0, 2.0))  # 1-2초 랜덤 지연
+            
+            # 1. 기존 데이터 확인 - 최신 날짜 조회
             latest_date = self.db.get_latest_date(symbol)
             
-            print(f"🔍 {symbol}: 기존 데이터 {len(existing_dates)}일, 최신 날짜: {latest_date}")
+            if latest_date:
+                # 기존 데이터가 있는 경우 - 증분 업데이트
+                print(f"🔄 {symbol}: 기존 최신 날짜 {latest_date} → 증분 업데이트")
+                
+                # 최신 날짜 다음 날부터 오늘까지 수집
+                start_date = latest_date + timedelta(days=1)
+                end_date = date.today()
+                
+                # 이미 최신 데이터라면 스킵
+                if start_date > end_date:
+                    print(f"✅ {symbol}: 이미 최신 데이터 (스킵)")
+                    return True
+                
+                # 증분 데이터 수집 (start/end 날짜 방식)
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(start=start_date, end=end_date + timedelta(days=1))
+                
+                if hist.empty:
+                    print(f"⚠️ {symbol}: 신규 데이터 없음 (주말/휴일)")
+                    return True
+                    
+                print(f"📊 {symbol}: {len(hist)}일 신규 데이터 수집")
+                
+            else:
+                # 신규 종목인 경우 - 전체 기간 수집
+                print(f"🆕 {symbol}: 신규 종목 → {period} 전체 데이터 수집")
+                
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period=period)
+                
+                if hist.empty:
+                    print(f"⚠️ {symbol}: 데이터 없음 (상장폐지 가능성)")
+                    return False
             
-            # 2. API 호출 제한 방지를 위한 지연 (5년 데이터용 - 배치 처리로 단축)
-            delay = random.uniform(1.0, 2.0)  # 1-2초 랜덤 지연 (배치 처리로 단축)
-            time.sleep(delay)
-            
-            # 3. yfinance로 데이터 수집 (curl_cffi 세션 제거로 API 오류 해결)
-            # Yahoo API가 curl_cffi를 요구하므로 세션 설정 제거
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(
-                period=period, 
-                auto_adjust=True,      # 배당/분할 자동 조정
-                prepost=False,         # 시간외 거래 제외
-                actions=False,         # 배당/분할 이벤트 제외 (속도 향상)
-                repair=True           # 데이터 오류 자동 수정
-            )
-            
-            if hist.empty:
-                print(f"⚠️ {symbol}: 히스토리 데이터가 비어있음")
-                return False
-            
-            # 4. 데이터 정리 (벡터화 연산으로 최적화)
+            # 2. 데이터 정제 및 변환
             hist = hist.reset_index()
             hist['symbol'] = symbol
             
-            # 컬럼명 일괄 변경
+            # 컬럼명 소문자 변환
             hist.columns = [col.lower().replace(' ', '_') for col in hist.columns]
             
-            # 날짜 처리 (pandas 벡터화)
+            # 날짜 컬럼 처리
             if 'date' in hist.columns:
                 hist['date'] = pd.to_datetime(hist['date']).dt.date
             
-            # 필요한 컬럼만 선택하고 NaN 제거
+            # 필요한 컬럼만 선택 및 NaN 제거
             required_columns = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume']
             hist = hist[required_columns].dropna()
             
@@ -85,25 +99,11 @@ class YFinanceCollector:
                 print(f"⚠️ {symbol}: 정제 후 데이터가 비어있음")
                 return False
             
-            # 5. 중복 날짜 필터링 (새로운 로직)
-            total_records = len(hist)
-            hist_filtered = hist[~hist['date'].isin(existing_dates)]  # 기존 날짜 제외
-            new_records = len(hist_filtered)
+            print(f"💾 {symbol}: {len(hist)}일 데이터 저장 중...")
             
-            if new_records == 0:
-                print(f"✅ {symbol}: 모든 데이터가 이미 존재함 ({total_records}개 중 신규 0개)")
-                return True
-            
-            # 6. DuckDB에 신규 데이터 배치 저장 (성능 최적화)
-            if new_records == 0:
-                print(f"✅ {symbol}: 모든 데이터가 이미 존재함 ({total_records}개 중 신규 0개)")
-                return True
-            
-            print(f"📊 {symbol}: {total_records}개 중 신규 {new_records}개 데이터 배치 저장")
-            
-            # 배치 저장을 위한 데이터 준비
+            # 3. 배치 저장을 위한 데이터 준비 (UPSERT로 중복 자동 처리)
             batch_data = []
-            for _, row in hist_filtered.iterrows():
+            for _, row in hist.iterrows():
                 try:
                     stock_data = {
                         'symbol': row['symbol'],
@@ -119,69 +119,37 @@ class YFinanceCollector:
                     print(f"⚠️ {symbol}: 데이터 변환 오류 - {data_error}")
                     continue
             
-            # 배치 저장 (한 번에 모든 데이터 저장)
+            # 4. 배치 저장 (UPSERT로 중복 자동 처리)
             if batch_data:
-                try:
-                    print(f"💾 {symbol}: {len(batch_data)}개 레코드 배치 저장 시작...")
-                    import sys
-                    sys.stdout.flush()  # 로그 즉시 출력
-                    
-                    save_count = self.db.save_stock_data_batch(batch_data)
-                    print(f"✅ {symbol}: {save_count}개 신규 레코드 배치 저장 성공")
-                    sys.stdout.flush()  # 로그 즉시 출력
-                    return True
-                except Exception as batch_error:
-                    print(f"❌ {symbol}: 배치 저장 실패 - {batch_error}")
-                    import sys
-                    sys.stdout.flush()  # 로그 즉시 출력
-                    
-                    # 배치 저장 실패시 개별 저장으로 폴백
-                    print(f"🔄 {symbol}: 개별 저장으로 폴백...")
-                    sys.stdout.flush()  # 로그 즉시 출력
-                    save_count = 0
-                    for stock_data in batch_data:
-                        try:
-                            self.db.save_stock_data(stock_data)
-                            save_count += 1
-                        except Exception as save_error:
-                            print(f"⚠️ {symbol}: 개별 저장 오류 - {save_error}")
-                            continue
-                    
-                    if save_count > 0:
-                        print(f"✅ {symbol}: {save_count}개 개별 저장 완료")
-                        return True
-                    else:
-                        print(f"❌ {symbol}: 저장된 레코드 없음")
-                        return False
+                save_count = self.db.save_stock_data_batch(batch_data)
+                print(f"✅ {symbol}: {save_count}개 데이터 저장 완료")
+                return True
             else:
                 print(f"❌ {symbol}: 변환된 데이터 없음")
                 return False
-            
+                
         except Exception as e:
             error_msg = str(e)
             if "delisted" in error_msg or "No data found" in error_msg:
-                print(f"⚠️ {symbol}: 상장폐지 또는 데이터 없음")
+                print(f"⚠️ {symbol}: 상장폐지 또는 데이터 없음 (스킵)")
                 return False
-            elif "rate limit" in error_msg.lower() or "429" in error_msg or "Too Many Requests" in error_msg:
-                print(f"🚫 {symbol}: API 호출 제한 감지 - 장시간 대기 중...")
-                time.sleep(random.uniform(10, 20))  # 10-20초 대기 (기존 2-5초에서 증가)
-                print(f"🔄 {symbol}: 재시도 중...")
-                # 재시도 시에는 더 긴 지연
-                time.sleep(random.uniform(5, 10))
-                return False  # 재시도 대신 실패로 처리하여 무한루프 방지
+            elif "rate limit" in error_msg.lower() or "429" in error_msg:
+                print(f"🚫 {symbol}: API 호출 제한 - 긴 대기 후 스킵")
+                time.sleep(random.uniform(20, 30))  # 5개 워커 사용시 더 긴 대기 (20-30초)
+                return False
             else:
                 print(f"💥 {symbol}: 수집 실패 - {error_msg}")
                 return False
     
-    def collect_all_symbols(self, symbols: List[str] = None, period: str = "2y", max_workers: int = 5, batch_size: int = 50) -> Dict[str, Any]:
+    def collect_all_symbols(self, symbols: List[str] = None, period: str = "5y", max_workers: int = 1, batch_size: int = 10) -> Dict[str, Any]:
         """
-        전체 종목 배치별 병렬 수집 (메모리 최적화)
+        전체 종목 배치별 병렬 수집 (증분 업데이트)
         
         Args:
             symbols: 수집할 종목 리스트 (None이면 DB에서 조회)
-            period: 수집 기간 
-            max_workers: 병렬 처리 수 (메모리 절약을 위해 기본값 2)
-            batch_size: 배치 크기 (메모리 절약을 위해 기본값 50)
+            period: 수집 기간 (신규 종목용)
+            max_workers: 병렬 처리 수
+            batch_size: 배치 크기
             
         Returns:
             수집 결과 통계
@@ -198,8 +166,8 @@ class YFinanceCollector:
                 return {'error': 'No active symbols found'}
         
         total_symbols = len(symbols)
-        print(f"🚀 {total_symbols}개 종목 배치별 병렬 수집 시작 (메모리 최적화)")
-        print(f"⚙️ 설정: 최대 {max_workers}개 워커, 배치 크기: {batch_size}, 수집 기간: {period}")
+        print(f"🚀 {total_symbols}개 종목 증분 업데이트 시작")
+        print(f"⚙️ 설정: 최대 {max_workers}개 워커, 배치 크기: {batch_size}, 신규 종목 기간: {period}")
         
         start_time = time.time()
         total_success = 0
@@ -255,10 +223,11 @@ class YFinanceCollector:
             # 메모리 정리 (배치 간)
             gc.collect()
             
-            # 배치 간 휴식 (API 제한 방지 및 메모리 안정화)
+            # 배치 간 휴식 (API 제한 방지 - 5개 워커에 맞춰 조정)
             if batch_end < total_symbols:
-                print(f"� 배치 간 휴식 (5초)...")
-                time.sleep(5)
+                cooldown_time = 15  # 5개 워커 사용시 더 긴 쿨다운
+                print(f"⏸ 배치 간 휴식 ({cooldown_time}초)...")
+                time.sleep(cooldown_time)
         
         elapsed_time = time.time() - start_time
         
@@ -273,11 +242,11 @@ class YFinanceCollector:
             'timestamp': datetime.now().isoformat()
         }
         
-        print(f"\n🎉 배치별 병렬 데이터 수집 완료!")
+        print(f"\n🎉 증분 업데이트 완료!")
         print(f"📊 최종 결과: 총 {result['total']}개, 성공 {result['success']}개, 실패 {result['fail']}개")
         print(f"⚡ 처리 시간: {result['elapsed_time']}초 (평균 {result['avg_time_per_symbol']}초/종목)")
-        print(f"� 배치 설정: {batch_size}개씩 {max_workers}병렬 처리")
-        print(f"💡 메모리 최적화로 안정성 향상!")
+        print(f"🏭 배치 설정: {batch_size}개씩 {max_workers}병렬 처리")
+        print(f"💡 증분 업데이트로 대폭 성능 향상!")
         
         return result
     
@@ -288,23 +257,23 @@ class YFinanceCollector:
 # Airflow 태스크 함수
 def collect_stock_data_yfinance_task(**context):
     """
-    고성능 병렬 주가 데이터 수집 태스크 (yfinance API 사용)
+    증분 업데이트 주가 데이터 수집 태스크 (yfinance API 사용)
     """
     import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
     
-    print("🚀 yfinance 고속 병렬 주가 데이터 수집 시작! (5년 데이터)")
+    print("🚀 증분 업데이트 주가 데이터 수집 시작! (신규 종목은 5년 데이터)")
     start_time = time.time()
     
-        # DuckDB에서 NASDAQ 심볼 목록 조회 (테스트용 제한)
+    # DuckDB에서 NASDAQ 심볼 목록 조회
     db = DuckDBManager()
     
     try:
-        symbols_query = "SELECT DISTINCT symbol FROM nasdaq_symbols"  # 더 작은 테스트 세트
+        symbols_query = "SELECT DISTINCT symbol FROM nasdaq_symbols"
         symbols_df = db.execute_query(symbols_query)
         
         if symbols_df.empty:
-            # 백업 심볼 사용 (메이저 종목들)
+            # 백업 심볼 사용 (현재 상장 중인 메이저 종목들)
             backup_symbols = [
                 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 
                 'NVDA', 'META', 'NFLX', 'ADBE', 'CRM',
@@ -312,18 +281,10 @@ def collect_stock_data_yfinance_task(**context):
                 'TXN', 'QCOM', 'MU', 'AMAT', 'LRCX'
             ]
             symbols = backup_symbols
-            print(f"📋 백업 심볼 사용: {len(symbols)}개")
+            print(f"📋 백업 심볼 사용: {len(symbols)}개 (현재 상장 종목)")
         else:
-            # 결과 타입에 따라 처리
-            # if hasattr(symbols_df, 'tolist'):
-            #     # pandas DataFrame 또는 QueryResult 클래스
-            #     symbols = symbols_df['symbol'].tolist()
-            # else:
-                # 일반 리스트
             symbols = symbols_df['symbol'].tolist()
-            
-            print(f"📋 NASDAQ 심볼 사용: {len(symbols)}개")
-            
+            print(f"📋 NASDAQ 심볼 사용: {len(symbols)}개 (현재 상장 종목)")
     except Exception as db_error:
         print(f"❌ 데이터베이스 조회 오류: {db_error}")
         # 데이터베이스 오류 시 백업 심볼 사용
@@ -336,26 +297,28 @@ def collect_stock_data_yfinance_task(**context):
     # YFinanceCollector 인스턴스 생성
     collector = YFinanceCollector()
     
-    # 병렬 수집 실행 - 메모리 최적화로 배치 처리 (5년 데이터, 안정성 우선)
-    result = collector.collect_all_symbols(symbols=symbols, max_workers=2, period="5y", batch_size=50)  # 배치 크기 50, 2개 워커로 안정성 확보
+    # 증분 업데이트 데이터 수집 (5개 워커, 20개 배치로 최적화)
+    result = collector.collect_all_symbols(symbols=symbols, max_workers=5, period="1y", batch_size=20)
     success_count = result['success']
     
     end_time = time.time()
     duration = end_time - start_time
     
-    print(f"✅ yfinance 배치별 병렬 수집 완료! (5년 데이터)")
+    print(f"✅ 증분 업데이트 데이터 수집 완료!")
     print(f"📊 처리 결과: {success_count}/{len(symbols)}개 성공")
     print(f"⏱️  총 소요시간: {duration:.2f}초 (평균 {duration/len(symbols):.2f}초/종목)")
     print(f"🚄 성능: {len(symbols)/duration:.2f} 종목/초")
-    print(f"🎯 전체 NASDAQ 종목 {len(symbols)}개 처리 완료! (5년 히스토리)")
-    print(f"🔧 메모리 최적화: 50개씩 배치 처리로 안정성 향상")
+    print(f"🎯 총 {len(symbols)}개 종목 처리 완료!")
+    print(f"🔧 메모리 최적화: 20개씩 배치 처리, 5개 워커 병렬")
+    print(f"⚡ 증분 업데이트로 대폭 성능 향상!")
     
     return {
         'total_symbols': len(symbols),
         'success_count': success_count,
         'duration': duration,
         'throughput': len(symbols)/duration,
-        'batch_size': 50,
-        'max_workers': 2,
-        'result_details': result
+        'batch_size': 20,
+        'max_workers': 5,
+        'result_details': result,
+        'update_mode': 'incremental'
     }

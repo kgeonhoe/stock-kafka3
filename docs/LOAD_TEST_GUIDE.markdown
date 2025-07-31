@@ -53,6 +53,296 @@ locust -f load_tests/stock_api_load_test.py --host=http://localhost:8080
 # 웹 브라우저에서 http://localhost:8089 접속
 ```
 
+---
+
+## 🕷️ Locust 부하테스트 상세 가이드
+
+### 1. **Locust 기본 실행**
+
+#### **💻 명령줄 실행**
+```bash
+# 기본 웹 UI 모드
+cd /home/grey1/stock-kafka3
+locust -f load_tests/stock_api_load_test.py --host=http://localhost:8080
+
+# 웹 브라우저에서 http://localhost:8089 접속
+# Number of users: 동시 사용자 수
+# Spawn rate: 초당 사용자 증가율
+# Host: 테스트 대상 서버 (http://localhost:8080)
+```
+
+#### **🚀 헤드리스 모드 (자동화)**
+```bash
+# 사용자 50명, 초당 10명씩 증가, 5분간 실행
+locust -f load_tests/stock_api_load_test.py \
+    --host=http://localhost:8080 \
+    --users 50 \
+    --spawn-rate 10 \
+    --run-time 5m \
+    --headless \
+    --html=locust_report.html \
+    --csv=locust_results
+
+# 결과 파일:
+# - locust_report.html     # HTML 리포트
+# - locust_results_stats.csv    # 통계 데이터
+# - locust_results_failures.csv # 실패 내역
+```
+
+### 2. **테스트 시나리오 구성**
+
+#### **📊 현재 구현된 시나리오** (`stock_api_load_test.py`)
+
+```python
+class StockAPILoadTest(HttpUser):
+    wait_time = between(1, 3)  # 요청 간 1-3초 대기
+    
+    @task(3)  # 가중치 3 (가장 자주 실행)
+    def test_yfinance_data_collection(self):
+        """📈 주식 데이터 수집 API 테스트"""
+        # - yfinance API 호출 시뮬레이션
+        # - 응답시간, 메모리 사용량 측정
+        # - 90% 성공률로 시뮬레이션
+    
+    @task(2)  # 가중치 2
+    def test_kafka_message_production(self):
+        """📤 Kafka 메시지 전송 테스트"""
+        # - 실제 Kafka 메시지 전송
+        # - 전송 시간, 파티션 정보 측정
+        # - 타임아웃 5초 설정
+    
+    @task(1)  # 가중치 1 (가장 적게 실행)
+    def test_database_heavy_operation(self):
+        """🗃️ 데이터베이스 집약적 작업 테스트"""
+        # - 무거운 DB 쿼리 시뮬레이션
+        # - 0.1-0.5초 처리시간
+        # - 85% 성공률
+```
+
+### 3. **웹 UI 사용법**
+
+#### **🌐 Locust 웹 대시보드 (http://localhost:8089)**
+
+**메인 화면 설정**:
+```
+┌─────────────────────────────────────┐
+│ Number of users (peak concurrency) │ 50   │  ⬅️ 최대 동시 사용자
+├─────────────────────────────────────┼──────┤
+│ Spawn rate (users started/second)  │ 10   │  ⬅️ 초당 사용자 증가율
+├─────────────────────────────────────┼──────┤
+│ Host (e.g. http://www.example.com)  │ http://localhost:8080 │
+└─────────────────────────────────────┴──────┘
+                [Start swarming] 🚀
+```
+
+**실시간 통계 화면**:
+- **Type**: 요청 유형 (GET, KAFKA, DB)
+- **Name**: 요청 이름 (/api/stock/AAPL/daily)
+- **# requests**: 총 요청 수
+- **# fails**: 실패 요청 수
+- **Median (ms)**: 중간값 응답시간
+- **90%ile (ms)**: 90% 응답시간
+- **Average (ms)**: 평균 응답시간
+- **Min/Max (ms)**: 최소/최대 응답시간
+- **Average size (bytes)**: 평균 응답 크기
+- **Current RPS**: 현재 초당 요청 수
+
+### 4. **고급 설정 및 커스터마이징**
+
+#### **🎯 신호 감지 시스템 특화 테스트**
+```bash
+# 신호 감지 시스템용 커스텀 Locust 파일 생성
+cat << 'EOF' > signal_detection_load_test.py
+from locust import HttpUser, task, between
+import json
+import random
+import time
+
+class SignalDetectionLoadTest(HttpUser):
+    wait_time = between(0.5, 2)  # 더 빠른 간격
+    
+    def on_start(self):
+        self.watchlist_symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
+    
+    @task(5)
+    def send_realtime_stock_data(self):
+        """실시간 주식 데이터 전송"""
+        symbol = random.choice(self.watchlist_symbols)
+        
+        # 신호 유발 가능성이 높은 데이터 생성
+        price_change = random.uniform(-3, 3)  # ±3% 변동
+        
+        data = {
+            'symbol': symbol,
+            'price': round(150 + (150 * price_change / 100), 2),
+            'volume': random.randint(10000, 500000),
+            'timestamp': time.time(),
+            'source': 'locust_load_test'
+        }
+        
+        # Kafka Producer 시뮬레이션 (실제로는 Kafka 전송)
+        response_time = random.uniform(0.01, 0.1)  # 10-100ms
+        
+        self.environment.events.request.fire(
+            request_type="KAFKA_SIGNAL",
+            name=f"realtime_data_{symbol}",
+            response_time=response_time * 1000,
+            response_length=len(json.dumps(data)),
+            exception=None
+        )
+    
+    @task(2)
+    def check_signal_detection(self):
+        """신호 감지 상태 확인"""
+        symbol = random.choice(self.watchlist_symbols)
+        
+        # Redis 신호 조회 시뮬레이션
+        response_time = random.uniform(0.005, 0.05)  # 5-50ms
+        
+        self.environment.events.request.fire(
+            request_type="REDIS_CHECK",
+            name=f"signal_check_{symbol}",
+            response_time=response_time * 1000,
+            response_length=512,
+            exception=None
+        )
+EOF
+
+# 신호 감지 특화 테스트 실행
+locust -f signal_detection_load_test.py \
+    --host=http://localhost:8080 \
+    --users 30 \
+    --spawn-rate 5 \
+    --run-time 10m \
+    --headless \
+    --html=signal_detection_report.html
+```
+
+#### **📊 다양한 부하 패턴 테스트**
+
+**1. 스파이크 테스트 (급격한 부하 증가)**
+```bash
+# 1분간 급격히 100명까지 증가
+locust -f load_tests/stock_api_load_test.py \
+    --host=http://localhost:8080 \
+    --users 100 \
+    --spawn-rate 100 \
+    --run-time 1m \
+    --headless
+```
+
+**2. 소크 테스트 (장기간 안정성)**
+```bash
+# 30분간 지속적 부하
+locust -f load_tests/stock_api_load_test.py \
+    --host=http://localhost:8080 \
+    --users 25 \
+    --spawn-rate 5 \
+    --run-time 30m \
+    --headless
+```
+
+**3. 볼륨 테스트 (대용량 처리)**
+```bash
+# 200명 동시 사용자
+locust -f load_tests/stock_api_load_test.py \
+    --host=http://localhost:8080 \
+    --users 200 \
+    --spawn-rate 20 \
+    --run-time 15m \
+    --headless
+```
+
+### 5. **결과 분석 및 해석**
+
+#### **📈 핵심 성능 지표**
+
+**응답시간 분석**:
+```
+Median: 50ms      ← 50% 요청이 이 시간 내 완료
+90%ile: 120ms     ← 90% 요청이 이 시간 내 완료  
+95%ile: 200ms     ← 95% 요청이 이 시간 내 완료
+99%ile: 500ms     ← 99% 요청이 이 시간 내 완료
+Max: 2000ms       ← 최대 응답시간
+```
+
+**처리량 분석**:
+```
+Total RPS: 150    ← 초당 총 요청 수
+Current RPS: 145  ← 현재 초당 요청 수
+Total Requests: 45,000  ← 총 처리 요청
+Failures: 450 (1%)      ← 실패율
+```
+
+#### **🔍 문제 식별 가이드**
+
+**높은 응답시간 (>1000ms)**:
+```bash
+# 원인 분석
+- CPU 병목: htop으로 CPU 사용률 확인
+- 메모리 부족: free -h로 메모리 상태 확인  
+- 네트워크 지연: ping, traceroute 확인
+- 데이터베이스 락: DuckDB 쿼리 성능 분석
+```
+
+**높은 실패율 (>5%)**:
+```bash
+# 실패 원인 분석
+- Kafka 연결 실패: docker compose logs kafka
+- 타임아웃 오류: 타임아웃 값 조정
+- 리소스 부족: Docker 리소스 할당량 증가
+```
+
+### 6. **Docker 환경에서 Locust 실행**
+
+#### **🐳 Docker 컨테이너로 Locust 실행**
+```bash
+# Locust Docker 이미지 실행
+docker run -d \
+    --name locust-master \
+    -p 8089:8089 \
+    -v /home/grey1/stock-kafka3:/mnt/locust \
+    locustio/locust \
+    -f /mnt/locust/load_tests/stock_api_load_test.py \
+    --master \
+    --host=http://host.docker.internal:8080
+
+# 워커 노드 추가 (선택사항)
+docker run -d \
+    --name locust-worker-1 \
+    -v /home/grey1/stock-kafka3:/mnt/locust \
+    locustio/locust \
+    -f /mnt/locust/load_tests/stock_api_load_test.py \
+    --worker \
+    --master-host=locust-master
+```
+
+### 7. **모니터링 통합**
+
+#### **📊 실시간 모니터링 동시 실행**
+```bash
+# 터미널 1: Locust 실행
+locust -f load_tests/stock_api_load_test.py --host=http://localhost:8080
+
+# 터미널 2: 시스템 리소스 모니터링
+watch -n 1 'docker stats --no-stream'
+
+# 터미널 3: Kafka 모니터링  
+docker compose logs kafka-consumer -f
+
+# 터미널 4: Streamlit 신호 감지 모니터링
+# 브라우저: http://localhost:8501 → "05_실시간_Redis_모니터링"
+```
+
+#### **📈 통합 분석 대시보드**
+```bash
+# 부하테스트 중 동시 모니터링
+# 1. Locust UI: http://localhost:8089 (부하테스트 상태)
+# 2. Kafka UI: http://localhost:8080 (메시지 처리 상태)  
+# 3. Streamlit: http://localhost:8501 (신호 감지 상태)
+# 4. System: htop, iostat (시스템 리소스)
+```
+
 ## 📊 테스트 시나리오
 
 ### 🌐 **1. API 부하테스트**

@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
+# 빌드 컨텍스트가 상위 디렉토리이므로 requirements-streamlit.txt는 루트에 있음
 COPY ./requirements-streamlit.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
@@ -18,4 +19,4 @@ RUN echo "[server]\nheadless = true\nenableCORS = false\n" > ~/.streamlit/config
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "/app/app.py"]
+CMD ["streamlit", "run", "/app/streamlit_app.py"]

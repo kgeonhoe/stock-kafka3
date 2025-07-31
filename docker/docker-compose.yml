@@ -118,6 +118,7 @@ services:
       - ../data:/data
       - ../common:/opt/airflow/common
       - ../config:/opt/airflow/config
+      - ../scripts:/opt/airflow/scripts
     user: "50000:0"  # airflow user ID 사용
     entrypoint: /bin/bash
     command: 
@@ -164,6 +165,7 @@ services:
       - ../data:/data
       - ../common:/opt/airflow/common
       - ../config:/opt/airflow/config
+      - ../scripts:/opt/airflow/scripts
       - airflow_logs:/opt/airflow/logs
     ports:
       - "8081:8080"
@@ -192,6 +194,7 @@ services:
       - ../data:/data
       - ../common:/opt/airflow/common
       - ../config:/opt/airflow/config
+      - ../scripts:/opt/airflow/scripts
       - airflow_logs:/opt/airflow/logs
     command: scheduler
     healthcheck:
@@ -218,6 +221,7 @@ services:
       - ../data:/data
       - ../common:/opt/airflow/common
       - ../config:/opt/airflow/config
+      - ../scripts:/opt/airflow/scripts
       - airflow_logs:/opt/airflow/logs
     command: celery worker
     mem_limit: 6g  # 메모리 제한 추가
@@ -359,7 +363,7 @@ services:
       - ../data:/data
     ports:
       - "8501:8501"
-    command: streamlit run /app/app.py --server.port=8501 --server.address=0.0.0.0
+    command: streamlit run /app/streamlit_app.py --server.port=8501 --server.address=0.0.0.0
     restart: unless-stopped
 
 volumes:

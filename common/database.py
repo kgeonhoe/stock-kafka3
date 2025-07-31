@@ -157,6 +157,41 @@ class DuckDBManager:
                 now
             ))
     
+    def is_nasdaq_symbols_collected_today(self) -> bool:
+        """
+        오늘 날짜에 NASDAQ 심볼이 이미 수집되었는지 확인
+        
+        Returns:
+            오늘 수집되었으면 True, 아니면 False
+        """
+        from datetime import date
+        today = date.today()
+        
+        result = self.conn.execute("""
+            SELECT COUNT(*) as count 
+            FROM nasdaq_symbols 
+            WHERE collected_at::date = ?
+        """, (today,)).fetchone()
+        
+        count = result[0] if result else 0
+        return count > 0
+    
+    def get_nasdaq_symbols_last_collected_date(self):
+        """
+        NASDAQ 심볼이 마지막으로 수집된 날짜 조회
+        
+        Returns:
+            마지막 수집 날짜 또는 None
+        """
+        result = self.conn.execute("""
+            SELECT collected_at::date as last_date 
+            FROM nasdaq_symbols 
+            ORDER BY collected_at DESC 
+            LIMIT 1
+        """).fetchone()
+        
+        return result[0] if result else None
+
     def get_existing_dates(self, symbol: str, days_back: int = 30) -> set:
         """
         특정 종목의 기존 데이터 날짜 조회
