@@ -42,6 +42,12 @@ data/
 *.h5
 *.html
 
+# Large database files
+data/duckdb/
+data/duckdb/*.db
+data/duckdb/*.wal
+data/duckdb/*.tmp
+
 # Checkpoints and cache
 *checkpoints*/
 checkpoints/

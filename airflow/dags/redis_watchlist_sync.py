@@ -35,40 +35,80 @@ default_args = {
 dag = DAG(
     'redis_watchlist_sync',
     default_args=default_args,
-    description='🔄 Redis 관심종목 스마트 동기화 (나스닥 파이프라인 완료 후)',
+    description='🔄 Redis 관심종목 스마트 동기화 (최적화된 대량 수집 완료 후)',
     schedule_interval=None,  # 수동 트리거 (의존성 기반)
     catchup=False,
     max_active_runs=1,
-    tags=['redis', 'watchlist', 'incremental', 'smart-update', 'signal-detection', 'triggered']
+    tags=['redis', 'watchlist', 'incremental', 'smart-update', 'signal-detection', 'triggered', 'optimized']
 )
 
 def read_pipeline_completion_info(**kwargs):
-    """완료된 파이프라인 정보 읽기"""
+    """완료된 파이프라인 정보 읽기 (대량 수집 또는 일반 파이프라인)"""
     import json
     
     try:
+        # 1. 대량 수집 완료 플래그 확인 (우선순위)
+        bulk_flag_file = "/tmp/nasdaq_bulk_collection_complete.flag"
+        
+        if os.path.exists(bulk_flag_file):
+            with open(bulk_flag_file, 'r') as f:
+                completion_info = json.loads(f.read())
+            
+            print(f"📊 대량 수집 파이프라인 완료 정보:")
+            print(f"   완료 시간: {completion_info['completion_time']}")
+            print(f"   DAG Run ID: {completion_info['dag_run_id']}")
+            print(f"   수집 타입: {completion_info['collection_type']}")
+            
+            # 수집 통계
+            final_stats = completion_info.get('final_stats', {})
+            main_table = final_stats.get('main_table', {})
+            print(f"   총 레코드: {main_table.get('record_count', 0):,}")
+            print(f"   종목 수: {main_table.get('symbol_count', 0):,}")
+            
+            date_range = main_table.get('date_range', {})
+            print(f"   데이터 범위: {date_range.get('start', 'Unknown')} ~ {date_range.get('end', 'Unknown')}")
+            
+            # Redis 동기화용 정보 준비
+            pipeline_results = {
+                'collected_symbols': main_table.get('symbol_count', 0),
+                'collected_ohlcv': main_table.get('record_count', 0),
+                'calculated_indicators': 0,  # 기술적 지표는 별도 계산
+                'scanned_watchlist': 0,     # 관심종목은 Redis에서 별도 관리
+                'data_source': 'bulk_collection',
+                'data_quality': completion_info.get('validation_results', {})
+            }
+            
+            completion_info['pipeline_results'] = pipeline_results
+            
+            # XCom에 정보 저장
+            kwargs['ti'].xcom_push(key='pipeline_completion_info', value=completion_info)
+            
+            return completion_info
+        
+        # 2. 기존 일반 파이프라인 플래그 확인 (백업)
         flag_file = "/tmp/nasdaq_pipeline_complete.flag"
         
-        if not os.path.exists(flag_file):
-            raise FileNotFoundError(f"나스닥 파이프라인 완료 플래그 파일이 없습니다: {flag_file}")
+        if os.path.exists(flag_file):
+            with open(flag_file, 'r') as f:
+                completion_info = json.loads(f.read())
+            
+            print(f"📊 일반 파이프라인 완료 정보:")
+            print(f"   완료 시간: {completion_info['completion_time']}")
+            print(f"   DAG Run ID: {completion_info['dag_run_id']}")
+            
+            results = completion_info.get('pipeline_results', {})
+            print(f"   처리 심볼 수: {results.get('collected_symbols', 0)}")
+            print(f"   수집 OHLCV: {results.get('collected_ohlcv', 0)}")
+            print(f"   계산 지표: {results.get('calculated_indicators', 0)}")
+            print(f"   관심종목 수: {results.get('scanned_watchlist', 0)}")
+            
+            # XCom에 정보 저장
+            kwargs['ti'].xcom_push(key='pipeline_completion_info', value=completion_info)
+            
+            return completion_info
         
-        with open(flag_file, 'r') as f:
-            completion_info = json.loads(f.read())
-        
-        print(f"📊 메인 파이프라인 완료 정보:")
-        print(f"   완료 시간: {completion_info['completion_time']}")
-        print(f"   DAG Run ID: {completion_info['dag_run_id']}")
-        
-        results = completion_info.get('pipeline_results', {})
-        print(f"   처리 심볼 수: {results.get('collected_symbols', 0)}")
-        print(f"   수집 OHLCV: {results.get('collected_ohlcv', 0)}")
-        print(f"   계산 지표: {results.get('calculated_indicators', 0)}")
-        print(f"   관심종목 수: {results.get('scanned_watchlist', 0)}")
-        
-        # XCom에 정보 저장 (다른 Task에서 사용 가능)
-        kwargs['ti'].xcom_push(key='pipeline_completion_info', value=completion_info)
-        
-        return completion_info
+        # 3. 둘 다 없으면 오류
+        raise FileNotFoundError("파이프라인 완료 플래그 파일을 찾을 수 없습니다")
         
     except Exception as e:
         print(f"❌ 파이프라인 완료 정보 읽기 실패: {e}")
@@ -234,14 +274,26 @@ def cleanup_old_data_task(**kwargs):
         print(f"❌ 데이터 정리 실패: {e}")
         raise
 
-# 1. 나스닥 파이프라인 완료 대기 (필수)
-wait_for_nasdaq = FileSensor(
-    task_id='wait_for_nasdaq_pipeline',
-    filepath='/tmp/nasdaq_pipeline_complete.flag',
+# 1. 대량 수집 또는 일반 파이프라인 완료 대기
+wait_for_pipeline = FileSensor(
+    task_id='wait_for_pipeline_completion',
+    filepath='/tmp/nasdaq_bulk_collection_complete.flag',  # 우선 대량 수집 완료 확인
     fs_conn_id='fs_default',
     poke_interval=300,  # 5분마다 확인
-    timeout=3600,  # 1시간 타임아웃
-    soft_fail=False,  # 메인 파이프라인 완료 필수
+    timeout=7200,  # 2시간 타임아웃 (대량 수집은 오래 걸림)
+    soft_fail=True,   # 실패 시 일반 파이프라인 플래그로 대체
+    dag=dag
+)
+
+# 1-1. 백업: 일반 파이프라인 완료 대기 (대량 수집 실패 시)
+wait_for_nasdaq_backup = FileSensor(
+    task_id='wait_for_nasdaq_pipeline_backup',
+    filepath='/tmp/nasdaq_pipeline_complete.flag',
+    fs_conn_id='fs_default',
+    poke_interval=300,
+    timeout=3600,
+    soft_fail=False,
+    trigger_rule='one_failed',  # 대량 수집 대기가 실패했을 때만 실행
     dag=dag
 )
 
@@ -297,7 +349,7 @@ success_notification = BashOperator(
 )
 
 # Task 의존성 설정 - 순차적 실행
-wait_for_nasdaq >> read_completion_info >> redis_sync >> redis_health_check >> [signal_prepare, cleanup_data] >> success_notification
+[wait_for_pipeline, wait_for_nasdaq_backup] >> read_completion_info >> redis_sync >> redis_health_check >> [signal_prepare, cleanup_data] >> success_notification
 
 # 수동 실행을 위한 독립적인 task
 manual_full_sync = PythonOperator(

@@ -40,8 +40,8 @@ class YFinanceCollector:
         import random
         
         try:
-            # API 호출 제한 방지를 위한 지연
-            time.sleep(random.uniform(1.0, 2.0))  # 1-2초 랜덤 지연
+            # API 호출 제한 방지를 위한 지연 (대량 수집 후 더 긴 지연)
+            time.sleep(random.uniform(3.0, 5.0))  # 3-5초 랜덤 지연 (기존 1-2초에서 증가)
             
             # 1. 기존 데이터 확인 - 최신 날짜 조회
             latest_date = self.db.get_latest_date(symbol)
@@ -134,8 +134,8 @@ class YFinanceCollector:
                 print(f"⚠️ {symbol}: 상장폐지 또는 데이터 없음 (스킵)")
                 return False
             elif "rate limit" in error_msg.lower() or "429" in error_msg:
-                print(f"🚫 {symbol}: API 호출 제한 - 긴 대기 후 스킵")
-                time.sleep(random.uniform(20, 30))  # 5개 워커 사용시 더 긴 대기 (20-30초)
+                print(f"🚫 {symbol}: API 호출 제한 - 대량 수집 후 API 제한 적용")
+                time.sleep(random.uniform(30, 60))  # 대량 수집 후 더 긴 대기 (30-60초)
                 return False
             else:
                 print(f"💥 {symbol}: 수집 실패 - {error_msg}")

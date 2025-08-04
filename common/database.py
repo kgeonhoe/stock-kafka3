@@ -238,7 +238,20 @@ class DuckDBManager:
                 WHERE symbol = ?
             """, (symbol,)).fetchone()
             
-            return result[0] if result and result[0] else None
+            if result and result[0]:
+                date_value = result[0]
+                # 문자열인 경우 날짜 객체로 변환
+                if isinstance(date_value, str):
+                    from datetime import datetime
+                    return datetime.strptime(date_value, '%Y-%m-%d').date()
+                # 이미 날짜 객체인 경우 그대로 반환
+                elif hasattr(date_value, 'year'):
+                    return date_value
+                else:
+                    print(f"⚠️ {symbol}: 예상치 못한 날짜 형식 - {type(date_value)}: {date_value}")
+                    return None
+            else:
+                return None
             
         except Exception as e:
             print(f"⚠️ {symbol}: 최신 날짜 조회 오류 - {e}")

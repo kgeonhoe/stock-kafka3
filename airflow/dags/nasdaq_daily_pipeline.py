@@ -12,12 +12,14 @@ import os
 # 플러그인 경로 추가
 sys.path.insert(0, '/opt/airflow/plugins')
 sys.path.insert(0, '/opt/airflow/common')
+sys.path.insert(0, '/opt/airflow/dags')
 
 # 플러그인 임포트
 from collect_nasdaq_symbols_api import NasdaqSymbolCollector
 from collect_stock_data_yfinance import collect_stock_data_yfinance_task
 from technical_indicators import calculate_technical_indicators_task
 from database import DuckDBManager
+from utils.dag_coordination import BulkCollectionSensor, check_api_rate_limits
 
 # 기본 인수 설정
 default_args = {
@@ -391,6 +393,38 @@ def create_replica_and_permissions_func(**kwargs):
         raise
     
 # 태스크 정의
+
+# 1. 대량 수집 상태 확인 센서
+bulk_collection_sensor = BulkCollectionSensor(
+    task_id='wait_for_bulk_collection_completion',
+    poke_interval=300,  # 5분마다 확인
+    timeout=3600,       # 1시간 타임아웃
+    mode='poke',
+    dag=dag,
+    doc_md="""
+    ## 🚦 대량 수집 충돌 방지 센서
+    
+    **목적**: 나스닥 대량 수집(bulk collection)과의 API 충돌 방지
+    
+    **동작**:
+    - 대량 수집이 실행 중이면 대기
+    - 대량 수집이 완료되거나 실행 중이 아니면 진행
+    - API 레이트 리미트 보호
+    """
+)
+
+# 2. API 상태 확인
+api_check = PythonOperator(
+    task_id='check_api_status',
+    python_callable=check_api_rate_limits,
+    dag=dag,
+    doc_md="""
+    ## 🌐 API 상태 확인
+    
+    **목적**: Yahoo Finance API 레이트 리미트 상태 확인
+    """
+)
+
 collect_symbols = PythonOperator(
     task_id='collect_nasdaq_symbols',
     python_callable=collect_nasdaq_symbols_func,
@@ -616,4 +650,5 @@ trigger_redis_sync = TriggerDagRunOperator(
 )
 
 # 태스크 의존성 설정 - 완전한 파이프라인
-collect_symbols >> collect_ohlcv >> calculate_indicators >> watchlist_scan >> create_replica >> create_completion_flag >> trigger_redis_sync
+# Task 의존성 설정 - 대량 수집 충돌 방지 포함
+bulk_collection_sensor >> api_check >> collect_symbols >> collect_ohlcv >> calculate_indicators >> watchlist_scan >> create_replica >> create_completion_flag >> trigger_redis_sync
