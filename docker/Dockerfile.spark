@@ -2,10 +2,12 @@ FROM bitnami/spark:3.5
 
 USER root
 
-# 빌드 도구 설치
+# 빌드 도구 설치 (PostgreSQL 라이브러리 추가)
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    libpq-dev \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ./requirements-spark.txt /requirements.txt

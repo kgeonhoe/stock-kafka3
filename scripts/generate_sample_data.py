@@ -17,8 +17,8 @@ sys.path.append('/opt/airflow/common')
 sys.path.append('/app/common')
 
 try:
-    from database import DuckDBManager
-    from technical_scanner import TechnicalScanner
+    from database import PostgreSQLManager
+    from technical_scanner_postgres import TechnicalScannerPostgreSQL
 except ImportError as e:
     print(f"Import error: {e}")
     sys.exit(1)
@@ -96,7 +96,7 @@ def main():
     
     try:
         # 데이터베이스 매니저 초기화
-        db = DuckDBManager(db_path="/data/duckdb/stock_data.db")
+        db = PostgreSQLManager()
         
         # 1. 나스닥 종목 데이터 생성 및 저장
         print("📈 나스닥 종목 데이터 생성 중...")
@@ -116,7 +116,7 @@ def main():
         
         # 3. 기술적 스캐너로 관심종목 생성
         print("🔍 관심종목 스캔 중...")
-        scanner = TechnicalScanner(db_path="/data/duckdb/stock_data.db")
+        scanner = TechnicalScannerPostgreSQL()
         
         # 최근 5일간 스캔 실행
         for i in range(5):

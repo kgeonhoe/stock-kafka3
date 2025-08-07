@@ -1,136 +1,88 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import duckdb
+import psycopg2
+import psycopg2.extras
 import os
 import json
-from typing import List, Dict, Any
-from datetime import datetime
+from typing import List, Dict, Any, Optional
+from datetime import datetime, date
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+from contextlib import contextmanager
 
-class DuckDBManager:
-    """DuckDB 데이터베이스 관리 클래스"""
+class PostgreSQLManager:
+    """PostgreSQL 데이터베이스 관리 클래스 (DuckDB 대체)"""
     
-    def __init__(self, db_path: str = "/data/duckdb/stock_data.db"):
+    def __init__(self, 
+                 host: str = None,
+                 port: int = None,
+                 user: str = None,
+                 password: str = None,
+                 database: str = None):
         """
-        DuckDB 매니저 초기화
+        PostgreSQL 매니저 초기화
         
         Args:
-            db_path: DuckDB 파일 경로
+            host: PostgreSQL 호스트 (기본값: 환경변수에서 읽음)
+            port: PostgreSQL 포트 (기본값: 환경변수에서 읽음)
+            user: PostgreSQL 사용자 (기본값: 환경변수에서 읽음)
+            password: PostgreSQL 비밀번호 (기본값: 환경변수에서 읽음)
+            database: PostgreSQL 데이터베이스 (기본값: 환경변수에서 읽음)
         """
-        self.db_path = db_path
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self.conn = duckdb.connect(db_path)
-        self._create_tables()
+        # 환경변수에서 연결 정보 읽기
+        self.host = host or os.getenv('POSTGRES_STOCK_HOST', 'localhost')
+        self.port = port or int(os.getenv('POSTGRES_STOCK_PORT', '5433'))
+        self.user = user or os.getenv('POSTGRES_STOCK_USER', 'stock_user')
+        self.password = password or os.getenv('POSTGRES_STOCK_PASSWORD', 'stock_password')
+        self.database = database or os.getenv('POSTGRES_STOCK_DB', 'stock_data')
+        
+        # 연결 파라미터
+        self.connection_params = {
+            'host': self.host,
+            'port': self.port,
+            'user': self.user,
+            'password': self.password,
+            'database': self.database
+        }
+        
+        # 연결 테스트
+        self._test_connection()
         
         # 동적 지표 관리자 초기화
         self.indicator_manager = DynamicIndicatorManager(self)
+        
+        print(f"✅ PostgreSQL 연결 성공: {self.host}:{self.port}/{self.database}")
     
-    def _create_tables(self):
-        """필요한 테이블 생성"""
-        # 나스닥 종목 테이블
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS nasdaq_symbols (
-                symbol VARCHAR PRIMARY KEY,
-                name VARCHAR,
-                market_cap VARCHAR,
-                sector VARCHAR,
-                collected_at TIMESTAMP
-            )
-        """)
-        
-        # 주가 데이터 테이블
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS stock_data (
-                symbol VARCHAR,
-                date DATE,
-                open DOUBLE,
-                high DOUBLE,
-                low DOUBLE,
-                close DOUBLE,
-                volume BIGINT,
-                PRIMARY KEY (symbol, date)
-            )
-        """)
-        
-        # 기술적 지표 테이블
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS stock_data_technical_indicators (
-                symbol VARCHAR,
-                date DATE,
-                bb_upper DOUBLE,
-                bb_middle DOUBLE,
-                bb_lower DOUBLE,
-                macd DOUBLE,
-                macd_signal DOUBLE,
-                macd_histogram DOUBLE,
-                rsi DOUBLE,
-                sma_5 DOUBLE,
-                sma_20 DOUBLE,
-                sma_60 DOUBLE,
-                ema_5 DOUBLE,
-                ema_20 DOUBLE,
-                ema_60 DOUBLE,
-                cci DOUBLE,
-                obv BIGINT,
-                ma_112 DOUBLE,
-                ma_224 DOUBLE,
-                ma_448 DOUBLE,
-                PRIMARY KEY (symbol, date)
-            )
-        """)
-        
-        # 일별 관심종목 테이블
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS daily_watchlist (
-                id INTEGER PRIMARY KEY,
-                symbol VARCHAR(10) NOT NULL,
-                date DATE NOT NULL,
-                condition_type VARCHAR(50) NOT NULL,  -- 'bollinger_upper_touch', 'rsi_oversold' 등
-                condition_value DECIMAL(10,4),
-                market_cap_tier INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(symbol, date, condition_type)
-            )
-        """)
-        
-        # 기술적 지표 계산용 뷰
-        self.conn.execute("""
-            CREATE VIEW IF NOT EXISTS stock_technical_indicators AS
-            SELECT 
-                symbol,
-                date,
-                close as close_price,
-                -- 볼린저 밴드 (20일 이동평균 ± 2 표준편차)
-                AVG(close) OVER (
-                    PARTITION BY symbol 
-                    ORDER BY date 
-                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
-                ) as bb_middle,
-                AVG(close) OVER (
-                    PARTITION BY symbol 
-                    ORDER BY date 
-                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
-                ) + 2 * STDDEV(close) OVER (
-                    PARTITION BY symbol 
-                    ORDER BY date 
-                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
-                ) as bb_upper,
-                AVG(close) OVER (
-                    PARTITION BY symbol 
-                    ORDER BY date 
-                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
-                ) - 2 * STDDEV(close) OVER (
-                    PARTITION BY symbol 
-                    ORDER BY date 
-                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
-                ) as bb_lower,
-                -- RSI 계산용 기본 데이터
-                close - LAG(close) OVER (
-                    PARTITION BY symbol ORDER BY date
-                ) as price_change
-            FROM stock_data
-            ORDER BY symbol, date
-        """)
+    def _test_connection(self):
+        """연결 테스트"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    result = cur.fetchone()
+                    if result[0] != 1:
+                        raise Exception("연결 테스트 실패")
+        except Exception as e:
+            raise Exception(f"PostgreSQL 연결 실패: {e}")
+    
+    @contextmanager
+    def get_connection(self):
+        """컨텍스트 매니저를 사용한 연결 관리"""
+        conn = None
+        try:
+            conn = psycopg2.connect(**self.connection_params)
+            yield conn
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            raise e
+        finally:
+            if conn:
+                conn.close()
     
     def save_nasdaq_symbols(self, symbols: List[Dict[str, Any]]):
         """
@@ -139,23 +91,26 @@ class DuckDBManager:
         Args:
             symbols: 나스닥 심볼 데이터 리스트
         """
-        now = datetime.now()
-        for symbol_data in symbols:
-            self.conn.execute("""
-                INSERT INTO nasdaq_symbols (symbol, name, market_cap, sector, collected_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (symbol) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    market_cap = EXCLUDED.market_cap,
-                    sector = EXCLUDED.sector,
-                    collected_at = EXCLUDED.collected_at
-            """, (
-                symbol_data.get('symbol'),
-                symbol_data.get('name'),
-                symbol_data.get('marketCap'),
-                symbol_data.get('sector'),
-                now
-            ))
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                now = datetime.now()
+                for symbol_data in symbols:
+                    cur.execute("""
+                        INSERT INTO nasdaq_symbols (symbol, name, market_cap, sector, collected_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (symbol) DO UPDATE SET
+                            name = EXCLUDED.name,
+                            market_cap = EXCLUDED.market_cap,
+                            sector = EXCLUDED.sector,
+                            collected_at = EXCLUDED.collected_at
+                    """, (
+                        symbol_data.get('symbol'),
+                        symbol_data.get('name'),
+                        symbol_data.get('marketCap'),
+                        symbol_data.get('sector'),
+                        now
+                    ))
+                conn.commit()
     
     def is_nasdaq_symbols_collected_today(self) -> bool:
         """
@@ -164,17 +119,19 @@ class DuckDBManager:
         Returns:
             오늘 수집되었으면 True, 아니면 False
         """
-        from datetime import date
         today = date.today()
         
-        result = self.conn.execute("""
-            SELECT COUNT(*) as count 
-            FROM nasdaq_symbols 
-            WHERE collected_at::date = ?
-        """, (today,)).fetchone()
-        
-        count = result[0] if result else 0
-        return count > 0
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) as count 
+                    FROM nasdaq_symbols 
+                    WHERE collected_at::date = %s
+                """, (today,))
+                
+                result = cur.fetchone()
+                count = result[0] if result else 0
+                return count > 0
     
     def get_nasdaq_symbols_last_collected_date(self):
         """
@@ -183,14 +140,17 @@ class DuckDBManager:
         Returns:
             마지막 수집 날짜 또는 None
         """
-        result = self.conn.execute("""
-            SELECT collected_at::date as last_date 
-            FROM nasdaq_symbols 
-            ORDER BY collected_at DESC 
-            LIMIT 1
-        """).fetchone()
-        
-        return result[0] if result else None
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT collected_at::date as last_date 
+                    FROM nasdaq_symbols 
+                    ORDER BY collected_at DESC 
+                    LIMIT 1
+                """)
+                
+                result = cur.fetchone()
+                return result[0] if result else None
 
     def get_existing_dates(self, symbol: str, days_back: int = 30) -> set:
         """
@@ -204,19 +164,22 @@ class DuckDBManager:
             기존 데이터가 있는 날짜들의 set
         """
         try:
-            from datetime import date, timedelta
+            from datetime import timedelta
             
             # 최근 N일간의 날짜 범위
             end_date = date.today()
             start_date = end_date - timedelta(days=days_back)
             
-            result = self.conn.execute("""
-                SELECT date FROM stock_data
-                WHERE symbol = ? AND date >= ? AND date <= ?
-                ORDER BY date DESC
-            """, (symbol, start_date, end_date)).fetchall()
-            
-            return {row[0] for row in result}
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT date FROM stock_data
+                        WHERE symbol = %s AND date >= %s AND date <= %s
+                        ORDER BY date DESC
+                    """, (symbol, start_date, end_date))
+                    
+                    result = cur.fetchall()
+                    return {row[0] for row in result}
             
         except Exception as e:
             print(f"⚠️ {symbol}: 기존 날짜 조회 오류 - {e}")
@@ -233,25 +196,29 @@ class DuckDBManager:
             최신 데이터 날짜 (없으면 None)
         """
         try:
-            result = self.conn.execute("""
-                SELECT MAX(date) FROM stock_data
-                WHERE symbol = ?
-            """, (symbol,)).fetchone()
-            
-            if result and result[0]:
-                date_value = result[0]
-                # 문자열인 경우 날짜 객체로 변환
-                if isinstance(date_value, str):
-                    from datetime import datetime
-                    return datetime.strptime(date_value, '%Y-%m-%d').date()
-                # 이미 날짜 객체인 경우 그대로 반환
-                elif hasattr(date_value, 'year'):
-                    return date_value
-                else:
-                    print(f"⚠️ {symbol}: 예상치 못한 날짜 형식 - {type(date_value)}: {date_value}")
-                    return None
-            else:
-                return None
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT MAX(date) FROM stock_data
+                        WHERE symbol = %s
+                    """, (symbol,))
+                    
+                    result = cur.fetchone()
+                    
+                    if result and result[0]:
+                        date_value = result[0]
+                        # 이미 날짜 객체인 경우 그대로 반환
+                        if hasattr(date_value, 'year'):
+                            return date_value
+                        # 문자열인 경우 날짜 객체로 변환
+                        elif isinstance(date_value, str):
+                            from datetime import datetime
+                            return datetime.strptime(date_value, '%Y-%m-%d').date()
+                        else:
+                            print(f"⚠️ {symbol}: 예상치 못한 날짜 형식 - {type(date_value)}: {date_value}")
+                            return None
+                    else:
+                        return None
             
         except Exception as e:
             print(f"⚠️ {symbol}: 최신 날짜 조회 오류 - {e}")
@@ -264,24 +231,27 @@ class DuckDBManager:
         Args:
             stock_data: 주가 데이터
         """
-        self.conn.execute("""
-            INSERT INTO stock_data (symbol, date, open, high, low, close, volume)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (symbol, date) DO UPDATE SET
-                open = EXCLUDED.open,
-                high = EXCLUDED.high,
-                low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                volume = EXCLUDED.volume
-        """, (
-            stock_data.get('symbol'),
-            stock_data.get('date'),
-            stock_data.get('open'),
-            stock_data.get('high'),
-            stock_data.get('low'),
-            stock_data.get('close'),
-            stock_data.get('volume')
-        ))
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO stock_data (symbol, date, open, high, low, close, volume)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (symbol, date) DO UPDATE SET
+                        open = EXCLUDED.open,
+                        high = EXCLUDED.high,
+                        low = EXCLUDED.low,
+                        close = EXCLUDED.close,
+                        volume = EXCLUDED.volume
+                """, (
+                    stock_data.get('symbol'),
+                    stock_data.get('date'),
+                    stock_data.get('open'),
+                    stock_data.get('high'),
+                    stock_data.get('low'),
+                    stock_data.get('close'),
+                    stock_data.get('volume')
+                ))
+                conn.commit()
     
     def save_stock_data_batch(self, stock_data_list: List[Dict[str, Any]]) -> int:
         """
@@ -311,16 +281,19 @@ class DuckDBManager:
                 ))
             
             # 배치 INSERT 실행
-            self.conn.executemany("""
-                INSERT INTO stock_data (symbol, date, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (symbol, date) DO UPDATE SET
-                    open = EXCLUDED.open,
-                    high = EXCLUDED.high,
-                    low = EXCLUDED.low,
-                    close = EXCLUDED.close,
-                    volume = EXCLUDED.volume
-            """, batch_values)
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    psycopg2.extras.execute_batch(cur, """
+                        INSERT INTO stock_data (symbol, date, open, high, low, close, volume)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (symbol, date) DO UPDATE SET
+                            open = EXCLUDED.open,
+                            high = EXCLUDED.high,
+                            low = EXCLUDED.low,
+                            close = EXCLUDED.close,
+                            volume = EXCLUDED.volume
+                    """, batch_values)
+                    conn.commit()
             
             return len(batch_values)
             
@@ -340,7 +313,7 @@ class DuckDBManager:
         columns = base_columns + all_indicators
         
         # 플레이스홀더 생성
-        placeholders = ', '.join(['?'] * len(columns))
+        placeholders = ', '.join(['%s'] * len(columns))
         
         # UPDATE SET 절 생성
         update_set = ', '.join([f"{col} = EXCLUDED.{col}" for col in all_indicators])
@@ -352,13 +325,16 @@ class DuckDBManager:
         ] + [indicator_data.get(col) for col in all_indicators]
         
         try:
-            self.conn.execute(f"""
-                INSERT INTO stock_data_technical_indicators 
-                ({', '.join(columns)})
-                VALUES ({placeholders})
-                ON CONFLICT (symbol, date) DO UPDATE SET
-                {update_set}
-            """, values)
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"""
+                        INSERT INTO stock_data_technical_indicators 
+                        ({', '.join(columns)})
+                        VALUES ({placeholders})
+                        ON CONFLICT (symbol, date) DO UPDATE SET
+                        {update_set}
+                    """, values)
+                    conn.commit()
         except Exception as e:
             print(f"❌ 지표 저장 오류: {e}")
     
@@ -369,10 +345,11 @@ class DuckDBManager:
     
     def get_active_symbols(self) -> List[str]:
         """활성 심볼 목록 조회"""
-        result = self.conn.execute("""
-            SELECT symbol FROM nasdaq_symbols
-        """).fetchall()
-        return [row[0] for row in result]
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT symbol FROM nasdaq_symbols")
+                result = cur.fetchall()
+                return [row[0] for row in result]
     
     def execute_query(self, query: str, params=None):
         """
@@ -383,40 +360,50 @@ class DuckDBManager:
             params: 쿼리 파라미터 (옵션)
             
         Returns:
-            결과 리스트
+            결과 리스트 또는 DataFrame
         """
         try:
-            # DuckDB의 fetchdf() 시도 (pandas가 있는 경우)
-            if params:
-                result = self.conn.execute(query, params).fetchdf()
+            if PANDAS_AVAILABLE:
+                # SQLAlchemy 연결 문자열 생성 (pandas 경고 방지)
+                connection_string = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}:{self.config['port']}/{self.config['database']}"
+                
+                # pandas를 사용한 DataFrame 반환 시도
+                if params:
+                    result = pd.read_sql_query(query, connection_string, params=params)
+                else:
+                    result = pd.read_sql_query(query, connection_string)
+                return result
             else:
-                result = self.conn.execute(query).fetchdf()
-            return result
-        except Exception:
-            # pandas가 없거나 오류 발생 시 일반 결과 반환
-            if params:
-                result = self.conn.execute(query, params).fetchall()
-            else:
-                result = self.conn.execute(query).fetchall()
-            
-            # 간단한 리스트 반환 클래스
-            class QueryResult:
-                def __init__(self, data):
-                    self.data = data
-                
-                @property
-                def empty(self):
-                    return len(self.data) == 0
-                
-                def __getitem__(self, key):
-                    if key == 'symbol':
-                        return [row[0] for row in self.data]
-                    return None
-                
-                def tolist(self):
-                    return [row[0] for row in self.data]
-            
-            return QueryResult(result)
+                # pandas가 없는 경우 일반 결과 반환
+                with self.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        if params:
+                            cur.execute(query, params)
+                        else:
+                            cur.execute(query)
+                        result = cur.fetchall()
+                        
+                        # 간단한 리스트 반환 클래스
+                        class QueryResult:
+                            def __init__(self, data):
+                                self.data = data
+                            
+                            @property
+                            def empty(self):
+                                return len(self.data) == 0
+                            
+                            def __getitem__(self, key):
+                                if key == 'symbol':
+                                    return [row[0] for row in self.data]
+                                return None
+                            
+                            def tolist(self):
+                                return [row[0] for row in self.data]
+                        
+                        return QueryResult(result)
+        except Exception as e:
+            print(f"쿼리 실행 오류: {e}")
+            raise
     
     def get_stock_data(self, symbol: str, days: int = 60):
         """
@@ -426,20 +413,23 @@ class DuckDBManager:
             symbol: 종목 심볼
             days: 조회할 날짜 수
         """
-        result = self.conn.execute("""
-            SELECT * FROM stock_data
-            WHERE symbol = ?
-            ORDER BY date DESC
-            LIMIT ?
-        """, (symbol, days)).fetchall()
-        return result
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM stock_data
+                    WHERE symbol = %s
+                    ORDER BY date DESC
+                    LIMIT %s
+                """, (symbol, days))
+                result = cur.fetchall()
+                return result
     
     def close(self):
-        """연결 종료"""
-        self.conn.close()
+        """연결 종료 (컨텍스트 매니저를 사용하므로 실제로는 불필요)"""
+        pass
 
 class DynamicIndicatorManager:
-    """동적 기술적 지표 관리 클래스"""
+    """동적 기술적 지표 관리 클래스 (PostgreSQL 버전)"""
     
     def __init__(self, db_manager):
         self.db = db_manager
@@ -494,20 +484,25 @@ class DynamicIndicatorManager:
     def _add_column_if_not_exists(self, column_name: str):
         """컬럼이 없으면 추가"""
         try:
-            # 컬럼 존재 여부 확인
-            existing = self.db.conn.execute("""
-                SELECT COUNT(*) FROM information_schema.columns 
-                WHERE table_name = 'stock_data_technical_indicators' 
-                AND column_name = ?
-            """, (column_name,)).fetchone()[0]
-            
-            if existing == 0:
-                self.db.conn.execute(f"""
-                    ALTER TABLE stock_data_technical_indicators 
-                    ADD COLUMN {column_name} DOUBLE
-                """)
-                print(f"✅ 새 지표 컬럼 추가: {column_name}")
-                
+            with self.db.get_connection() as conn:
+                with conn.cursor() as cur:
+                    # 컬럼 존재 여부 확인
+                    cur.execute("""
+                        SELECT COUNT(*) FROM information_schema.columns 
+                        WHERE table_name = 'stock_data_technical_indicators' 
+                        AND column_name = %s
+                    """, (column_name,))
+                    
+                    existing = cur.fetchone()[0]
+                    
+                    if existing == 0:
+                        cur.execute(f"""
+                            ALTER TABLE stock_data_technical_indicators 
+                            ADD COLUMN {column_name} NUMERIC(12,4)
+                        """)
+                        conn.commit()
+                        print(f"✅ 새 지표 컬럼 추가: {column_name}")
+                        
         except Exception as e:
             print(f"⚠️ 컬럼 {column_name} 추가 실패: {e}")
     
@@ -527,3 +522,7 @@ class DynamicIndicatorManager:
         self._add_column_if_not_exists(name)
         
         print(f"✅ 새 지표 추가됨: {name} ({category})")
+
+
+# 호환성을 위한 별칭 (기존 DuckDBManager 대신 사용)
+DuckDBManager = PostgreSQLManager

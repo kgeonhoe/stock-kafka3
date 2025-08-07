@@ -2,14 +2,16 @@ FROM apache/airflow:2.7.3-python3.10
 
 USER root
 
-# 필수 시스템 패키지 설치
+# 필수 시스템 패키지 설치 (PostgreSQL 클라이언트 라이브러리 추가)
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    libpq-dev \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # 데이터 디렉토리 생성 및 권한 설정
-RUN mkdir -p /data/duckdb && chown -R airflow:root /data
+RUN mkdir -p /data && chown -R airflow:root /data
 
 USER airflow
 

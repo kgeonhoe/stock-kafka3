@@ -5,6 +5,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    libpq-dev \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # 빌드 컨텍스트가 상위 디렉토리이므로 requirements-streamlit.txt는 루트에 있음

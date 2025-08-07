@@ -5,7 +5,7 @@ apache-airflow-providers-http
 apache-airflow-providers-apache-spark
 
 # Database and data processing (버전 제한 완화)
-duckdb>=0.9.0
+psycopg2-binary>=2.9.0
 pandas>=2.0.0
 numpy>=1.24.0
 scipy>=1.10.0

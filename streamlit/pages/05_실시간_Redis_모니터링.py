@@ -95,19 +95,46 @@ try:
         
         # 활성 신호 조회
         try:
-            # Redis에서 직접 기술적 지표 데이터를 조회하여 신호 생성
-            indicators_keys = redis_client.redis_client.keys("indicators:*")
+            # PostgreSQL daily_watchlist에서 활성 관심종목 목록 먼저 가져오기
+            valid_watchlist_symbols = set()
+            try:
+                # PostgreSQL에서 실제 관심종목 목록 조회
+                from common.database import PostgreSQLManager
+                db_manager = PostgreSQLManager()
+                query = """
+                SELECT DISTINCT symbol 
+                FROM daily_watchlist 
+                ORDER BY symbol
+                """
+                result = db_manager.execute_query(query)
+                if result:
+                    valid_watchlist_symbols = set([row[0] for row in result])
+                    print(f"✅ PostgreSQL에서 {len(valid_watchlist_symbols)}개 관심종목 확인: {list(valid_watchlist_symbols)}")
+                else:
+                    print("⚠️ PostgreSQL daily_watchlist가 비어있음")
+                db_manager.close()
+            except Exception as db_e:
+                print(f"❌ PostgreSQL 관심종목 조회 실패: {db_e}")
+            
+            # 기존 저장된 활성 신호들 조회 (관심종목에 있는 것만)
+            stored_signals_keys = redis_client.redis_client.keys("active_signal:*")
             active_signals = []
             
-            for key in indicators_keys:
-                symbol = key.replace("indicators:", "")
-                indicator_data_str = redis_client.redis_client.get(key)
-                
-                if indicator_data_str:
+            # 저장된 신호들 처리
+            for key in stored_signals_keys:
+                signal_data_str = redis_client.redis_client.get(key)
+                if signal_data_str:
                     try:
-                        indicator_data = json.loads(indicator_data_str)
+                        stored_signal = json.loads(signal_data_str)
+                        symbol = stored_signal['symbol']
                         
-                        # 실시간 가격 데이터 조회
+                        # 관심종목에 없는 종목의 신호는 제거
+                        if valid_watchlist_symbols and symbol not in valid_watchlist_symbols:
+                            print(f"🗑️ {symbol}: 관심종목에 없는 종목의 신호 제거")
+                            redis_client.redis_client.delete(key)
+                            continue
+                        
+                        # 현재 실시간 가격 조회
                         realtime_key = f"realtime:{symbol}"
                         realtime_data_str = redis_client.redis_client.get(realtime_key)
                         current_price = None
@@ -115,6 +142,48 @@ try:
                         if realtime_data_str:
                             realtime_data = json.loads(realtime_data_str)
                             current_price = realtime_data.get('price')
+                        
+                        # 저장된 신호에 현재 가격 추가
+                        stored_signal['current_price'] = current_price
+                        active_signals.append(stored_signal)
+                        
+                    except json.JSONDecodeError:
+                        continue
+            
+            # 신규 신호 감지 및 저장 (관심종목에 있는 것만)
+            indicators_keys = redis_client.redis_client.keys("indicators:*")
+            
+            for key in indicators_keys:
+                symbol = key.replace("indicators:", "")
+                
+                # 관심종목에 없는 종목은 건너뛰기
+                if valid_watchlist_symbols and symbol not in valid_watchlist_symbols:
+                    print(f"⏭️ {symbol}: 관심종목에 없는 종목, 신호 생성 건너뛰기")
+                    continue
+                
+                indicator_data_str = redis_client.redis_client.get(key)
+                
+                if indicator_data_str:
+                    try:
+                        indicator_data = json.loads(indicator_data_str)
+                        
+                        # 실시간 가격 데이터 조회 (현재 가격)
+                        realtime_key = f"realtime:{symbol}"
+                        realtime_data_str = redis_client.redis_client.get(realtime_key)
+                        current_price = None
+                        current_timestamp = None
+                        
+                        if realtime_data_str:
+                            try:
+                                realtime_data = json.loads(realtime_data_str)
+                                current_price = realtime_data.get('price')
+                                current_timestamp = realtime_data.get('timestamp')
+                            except json.JSONDecodeError:
+                                pass
+                        
+                        # 지표 계산 시점의 가격 (신호 발생 기준가)
+                        indicator_price = indicator_data.get('current_price')
+                        indicator_timestamp = indicator_data.get('calculation_time')
                         
                         # 신호 조건 확인
                         rsi = indicator_data.get('rsi')
@@ -125,50 +194,72 @@ try:
                         
                         detected_signals = []
                         
-                        # RSI 기반 신호
+                        # RSI 기반 신호 (새로운 신호만 저장)
                         if rsi and rsi > 70:
-                            detected_signals.append({
-                                'symbol': symbol,
-                                'signal_type': 'rsi_overbought',
-                                'trigger_price': current_price or indicator_data.get('current_price'),
-                                'current_price': current_price,
-                                'rsi_value': rsi,
-                                'trigger_time': indicator_data.get('calculation_time'),
-                                'strength': abs(rsi - 70)
-                            })
+                            signal_key = f"active_signal:{symbol}:rsi_overbought"
+                            if not redis_client.redis_client.exists(signal_key):
+                                new_signal = {
+                                    'symbol': symbol,
+                                    'signal_type': 'rsi_overbought',
+                                    'trigger_price': indicator_price,  # 신호 발생 시점 가격 고정
+                                    'current_price': current_price,  # 현재 실시간 가격
+                                    'rsi_value': rsi,
+                                    'trigger_time': indicator_timestamp,
+                                    'strength': abs(rsi - 70),
+                                    'created_at': indicator_timestamp
+                                }
+                                # Redis에 신호 저장 (24시간 TTL)
+                                redis_client.redis_client.setex(signal_key, 86400, json.dumps(new_signal))
+                                detected_signals.append(new_signal)
+                        
                         elif rsi and rsi < 30:
-                            detected_signals.append({
-                                'symbol': symbol,
-                                'signal_type': 'rsi_oversold',
-                                'trigger_price': current_price or indicator_data.get('current_price'),
-                                'current_price': current_price,
-                                'rsi_value': rsi,
-                                'trigger_time': indicator_data.get('calculation_time'),
-                                'strength': abs(30 - rsi)
-                            })
+                            signal_key = f"active_signal:{symbol}:rsi_oversold"
+                            if not redis_client.redis_client.exists(signal_key):
+                                new_signal = {
+                                    'symbol': symbol,
+                                    'signal_type': 'rsi_oversold',
+                                    'trigger_price': indicator_price,  # 신호 발생 시점 가격 고정
+                                    'current_price': current_price,  # 현재 실시간 가격
+                                    'rsi_value': rsi,
+                                    'trigger_time': indicator_timestamp,
+                                    'strength': abs(30 - rsi),
+                                    'created_at': indicator_timestamp
+                                }
+                                redis_client.redis_client.setex(signal_key, 86400, json.dumps(new_signal))
+                                detected_signals.append(new_signal)
                         
                         # MACD 기반 신호
                         if macd and macd_signal and macd > macd_signal:
-                            detected_signals.append({
-                                'symbol': symbol,
-                                'signal_type': 'macd_bullish',
-                                'trigger_price': current_price or indicator_data.get('current_price'),
-                                'current_price': current_price,
-                                'macd_value': macd,
-                                'trigger_time': indicator_data.get('calculation_time'),
-                                'strength': abs(macd - macd_signal)
-                            })
+                            signal_key = f"active_signal:{symbol}:macd_bullish"
+                            if not redis_client.redis_client.exists(signal_key):
+                                new_signal = {
+                                    'symbol': symbol,
+                                    'signal_type': 'macd_bullish',
+                                    'trigger_price': indicator_price,  # 신호 발생 시점 가격 고정
+                                    'current_price': current_price,  # 현재 실시간 가격
+                                    'macd_value': macd,
+                                    'trigger_time': indicator_timestamp,
+                                    'strength': abs(macd - macd_signal),
+                                    'created_at': indicator_timestamp
+                                }
+                                redis_client.redis_client.setex(signal_key, 86400, json.dumps(new_signal))
+                                detected_signals.append(new_signal)
                         
-                        # 볼린저 밴드 신호 (신호 리스트에서 확인)
+                        # 볼린저 밴드 신호
                         if signals and any('볼린저' in str(signal) for signal in signals):
-                            detected_signals.append({
-                                'symbol': symbol,
-                                'signal_type': 'bollinger_upper_touch',
-                                'trigger_price': current_price or indicator_data.get('current_price'),
-                                'current_price': current_price,
-                                'trigger_time': indicator_data.get('calculation_time'),
-                                'strength': 5  # 기본값
-                            })
+                            signal_key = f"active_signal:{symbol}:bollinger_upper_touch"
+                            if not redis_client.redis_client.exists(signal_key):
+                                new_signal = {
+                                    'symbol': symbol,
+                                    'signal_type': 'bollinger_upper_touch',
+                                    'trigger_price': indicator_price,  # 신호 발생 시점 가격 고정
+                                    'current_price': current_price,  # 현재 실시간 가격
+                                    'trigger_time': indicator_timestamp,
+                                    'strength': 5,  # 기본값
+                                    'created_at': indicator_timestamp
+                                }
+                                redis_client.redis_client.setex(signal_key, 86400, json.dumps(new_signal))
+                                detected_signals.append(new_signal)
                         
                         active_signals.extend(detected_signals)
                         
@@ -184,13 +275,34 @@ try:
                 for signal in active_signals:
                     symbol = signal['symbol']
                     trigger_price = signal.get('trigger_price', 0)
-                    current_price = signal.get('current_price', trigger_price)
+                    current_price = signal.get('current_price')  # None일 수 있음
                     
-                    # 성과 계산
-                    if trigger_price and current_price and trigger_price > 0:
+                    # 현재 가격이 없으면 실시간 데이터에서 다시 조회 시도
+                    if current_price is None:
+                        realtime_key = f"realtime:{symbol}"
+                        realtime_data_str = redis_client.redis_client.get(realtime_key)
+                        if realtime_data_str:
+                            try:
+                                realtime_data = json.loads(realtime_data_str)
+                                current_price = realtime_data.get('price')
+                                print(f"[DEBUG] {symbol}: 재조회 current_price={current_price}")
+                            except:
+                                pass
+                    
+                    # 여전히 현재 가격이 없으면 표시용으로만 trigger_price 사용하되, 성과 계산은 건너뛰기
+                    display_current_price = current_price if current_price is not None else trigger_price
+                    
+                    # 성과 계산 (실제 현재 가격이 있을 때만)
+                    if trigger_price and current_price is not None and trigger_price > 0 and current_price != trigger_price:
                         price_change_pct = ((current_price - trigger_price) / trigger_price) * 100
+                        price_change_abs = current_price - trigger_price
                     else:
                         price_change_pct = 0
+                        price_change_abs = 0
+                        if current_price is None:
+                            print(f"[DEBUG] {symbol}: 현재 가격 없음 - 성과 계산 불가")
+                        elif current_price == trigger_price:
+                            print(f"[DEBUG] {symbol}: 현재가={current_price}, 트리거가={trigger_price} - 동일함")
                     
                     # 신호 타입 한글 변환
                     signal_type_names = {
@@ -218,11 +330,13 @@ try:
                         'Symbol': signal['symbol'],
                         'Signal': signal_type_names.get(signal['signal_type'], signal['signal_type']),
                         'Trigger Price': f"${trigger_price:.2f}" if trigger_price else "N/A",
-                        'Current Price': f"${current_price:.2f}" if current_price else "N/A",
-                        'Change': f"{price_change_pct:+.2f}%" if price_change_pct != 0 else "0.00%",
+                        'Current Price': f"${display_current_price:.2f}" if display_current_price else "N/A",
+                        'Change ($)': f"${price_change_abs:+.2f}" if price_change_abs != 0 else "$0.00",
+                        'Change (%)': f"{price_change_pct:+.2f}%" if price_change_pct != 0 else "0.00%",
                         'Performance': performance_icon,
                         'Trigger Time': format_korean_time(signal.get('trigger_time', 'N/A')),
                         'Strength': f"{signal.get('strength', 0):.2f}",
+                        'Status': "📊 Active" if current_price is not None and current_price != trigger_price else "⏸️ No Data",
                         '_change_pct': price_change_pct,
                         '_color': performance_color
                     })
@@ -256,7 +370,7 @@ try:
                     
                     # 성과에 따른 색상 코딩을 위한 스타일링
                     df = pd.DataFrame(signal_performance)
-                    display_df = df[['Symbol', 'Signal', 'Trigger Price', 'Current Price', 'Change', 'Performance', 'Strength', 'Trigger Time']]
+                    display_df = df[['Symbol', 'Signal', 'Trigger Price', 'Current Price', 'Change ($)', 'Change (%)', 'Performance', 'Strength', 'Status', 'Trigger Time']]
                     
                     # 조건부 포맷팅 - 다크 테마 적용
                     def highlight_performance(row):

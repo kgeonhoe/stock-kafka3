@@ -18,7 +18,8 @@ from pyspark.sql.types import StructType, StructField, StringType, DoubleType, T
 
 # 로컬 패키지들
 from common.redis_manager import RedisManager
-from common.technical_indicator_calculator import TechnicalIndicatorCalculator
+from common.technical_indicator_calculator_postgres import TechnicalIndicatorCalculatorPostgreSQL
+from common.database import PostgreSQLManager
 from config.kafka_config import KafkaConfig
 
 def process_realtime_data_with_spark():
@@ -28,15 +29,38 @@ def process_realtime_data_with_spark():
         
         # Redis 및 기술적 지표 계산기 초기화
         redis_manager = RedisManager()
-        indicator_calculator = TechnicalIndicatorCalculator()
+        indicator_calculator = TechnicalIndicatorCalculatorPostgreSQL()
+        db_manager = PostgreSQLManager()
+        
+        # PostgreSQL에서 daily_watchlist 로드
+        def load_watchlist_symbols():
+            try:
+                query = """
+                SELECT DISTINCT symbol 
+                FROM daily_watchlist 
+                ORDER BY symbol
+                """
+                result = db_manager.execute_query(query)
+                if result:
+                    symbols = [row[0] for row in result]
+                    print(f"✅ PostgreSQL에서 {len(symbols)}개 daily_watchlist 종목 로드")
+                    return symbols
+                else:
+                    print("⚠️ daily_watchlist가 비어있음, 빈 목록 반환")
+                    print("💡 PostgreSQL daily_watchlist 테이블에 관심종목을 추가해주세요.")
+                    return []  # 빈 리스트 반환
+            except Exception as e:
+                print(f"❌ daily_watchlist 로드 실패: {e}")
+                print("💡 PostgreSQL daily_watchlist 테이블을 확인해주세요.")
+                return []  # 빈 리스트 반환
         
         # Redis 연결 테스트
         if redis_manager.redis_client.ping():
             print("✅ Redis 연결 성공")
             
-            # 관심종목 데이터 초기 로딩
+            # PostgreSQL watchlist에서 관심종목 데이터 초기 로딩
             try:
-                watchlist_symbols = ['AAPL', 'GOOGL', 'NVDA', 'TSLA', 'MSFT', 'META', 'AMZN', 'NFLX', 'ADBE', 'CRM']
+                watchlist_symbols = load_watchlist_symbols()
                 for symbol in watchlist_symbols:
                     watchlist_data = {
                         'symbol': symbol,
@@ -44,12 +68,12 @@ def process_realtime_data_with_spark():
                         'status': 'active',
                         'alerts_enabled': 'true',  # Redis는 문자열로 저장
                         'price_target': '',  # None 대신 빈 문자열 사용
-                        'notes': f'{symbol} 관심종목'
+                        'notes': f'{symbol} PostgreSQL watchlist 종목'
                     }
                     redis_manager.redis_client.hset(f"watchlist:{symbol}", mapping=watchlist_data)
-                print(f"✅ 관심종목 데이터 로딩 완료: {len(watchlist_symbols)}개")
+                print(f"✅ PostgreSQL watchlist 데이터 Redis 동기화 완료: {len(watchlist_symbols)}개")
             except Exception as e:
-                print(f"❌ 관심종목 데이터 로딩 실패: {e}")
+                print(f"❌ watchlist 데이터 Redis 동기화 실패: {e}")
                 
         else:
             print("❌ Redis 연결 실패")

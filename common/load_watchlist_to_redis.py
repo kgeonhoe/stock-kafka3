@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-관심종목 데이터를 DuckDB에서 Redis로 로딩하는 스크립트
+관심종목 데이터를 PostgreSQL에서 Redis로 로딩하는 스크립트
 """
 
 import sys
@@ -10,17 +10,25 @@ import os
 from datetime import datetime, timedelta, date
 import json
 
+# pandas 사용 가능성 확인
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+    print("⚠️ pandas 없음 - 기본 모드로 동작")
+
 # 프로젝트 경로 추가
 sys.path.append('/opt/airflow/common')
 
-from database import DuckDBManager
+from database import PostgreSQLManager
 from redis_client import RedisClient
 
 class WatchlistDataLoader:
-    """관심종목 데이터를 Redis에 로딩하는 클래스"""
+    """관심종목 데이터를 Redis에 로딩하는 클래스 (PostgreSQL 버전)"""
     
     def __init__(self):
-        self.db = DuckDBManager('/data/duckdb/stock_data_replica.db')
+        self.db = PostgreSQLManager()
         self.redis = RedisClient()
     
     def load_watchlist_to_redis(self, days_back: int = 30):
@@ -42,7 +50,7 @@ class WatchlistDataLoader:
                     market_cap,
                     market_cap_tier
                 FROM daily_watchlist 
-                WHERE scan_date >= ?
+                WHERE scan_date >= %s
                 ORDER BY scan_date DESC, market_cap DESC
             """
             
@@ -72,10 +80,10 @@ class WatchlistDataLoader:
                             close,
                             volume
                         FROM stock_data 
-                        WHERE symbol = ? 
-                        AND date >= ?
+                        WHERE symbol = %s 
+                        AND date >= %s
                         ORDER BY date DESC
-                        LIMIT ?
+                        LIMIT %s
                     """
                     
                     historical_date = date.today() - timedelta(days=days_back)
@@ -293,7 +301,7 @@ class WatchlistDataLoader:
             query = """
                 SELECT DISTINCT symbol 
                 FROM daily_watchlist 
-                WHERE scan_date >= ?
+                WHERE scan_date >= %s
             """
             cutoff_date = date.today() - timedelta(days=7)
             df = self.db.execute_query(query, (cutoff_date,))
@@ -322,7 +330,7 @@ class WatchlistDataLoader:
             new_data_query = """
                 SELECT date, open, high, low, close, volume
                 FROM stock_data 
-                WHERE symbol = ? AND date > ?
+                WHERE symbol = %s AND date > %s
                 ORDER BY date DESC
             """
             
@@ -380,7 +388,7 @@ class WatchlistDataLoader:
             meta_query = """
                 SELECT DISTINCT name, sector, market_cap, market_cap_tier
                 FROM daily_watchlist 
-                WHERE symbol = ?
+                WHERE symbol = %s
                 ORDER BY scan_date DESC
                 LIMIT 1
             """
@@ -394,7 +402,7 @@ class WatchlistDataLoader:
             historical_query = """
                 SELECT date, open, high, low, close, volume
                 FROM stock_data 
-                WHERE symbol = ? AND date >= ?
+                WHERE symbol = %s AND date >= %s
                 ORDER BY date DESC
                 LIMIT 30
             """

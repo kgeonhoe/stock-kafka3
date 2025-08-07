@@ -27,6 +27,7 @@ class KafkaConfig:
     # Consumer 그룹
     CONSUMER_GROUP_REALTIME = 'realtime-consumer-group'
     CONSUMER_GROUP_ANALYTICS = 'analytics-consumer-group'
+    CONSUMER_GROUP_POSTGRES = 'postgres-consumer-group'
     
     # Producer 설정
     PRODUCER_CONFIG = {

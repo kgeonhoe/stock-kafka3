@@ -13,7 +13,7 @@ import random
 import sys
 sys.path.append('/app')
 
-from common.database import DuckDBManager
+from common.database import PostgreSQLManager
 from config.kafka_config import KafkaConfig, DataSource
 
 
@@ -383,13 +383,59 @@ class MultiSourceStockProducer:
         self.kis_client = KISAPIClient()
         self.yfinance_client = YFinanceClient()
         
-        # 주식 심볼 목록
-        self.nasdaq_symbols = [
+        # PostgreSQL 연결 초기화
+        self.db_manager = PostgreSQLManager()
+        
+        # watchlist에서 관심종목 로드
+        self.watchlist_symbols = self.load_watchlist_symbols()
+        
+        print(f"📊 {len(self.watchlist_symbols)}개 watchlist 종목 실시간 데이터 수집 준비 완료")
+    
+    def load_watchlist_symbols(self) -> list:
+        """PostgreSQL daily_watchlist에서 관심종목 로드"""
+        try:
+            # daily_watchlist 테이블에서 최신 날짜의 종목들 조회
+            query = """
+            SELECT DISTINCT symbol 
+            FROM daily_watchlist 
+            
+            ORDER BY symbol
+            """
+            
+            result = self.db_manager.execute_query(query)
+            
+            if result:
+                symbols = [row[0] for row in result]
+                print(f"✅ PostgreSQL daily_watchlist에서 {len(symbols)}개 종목 로드: {symbols[:5]}{'...' if len(symbols) > 5 else ''}")
+                return symbols
+            else:
+                print("⚠️ daily_watchlist가 비어있음, 기본 종목 없이 실행 중단")
+                print("💡 PostgreSQL daily_watchlist 테이블에 관심종목을 추가해주세요.")
+                return []  # 빈 리스트 반환하여 실행 중단
+                
+        except Exception as e:
+            print(f"❌ daily_watchlist 로드 실패: {e}")
+            print("� PostgreSQL daily_watchlist 테이블을 확인해주세요.")
+            return []  # 빈 리스트 반환하여 실행 중단
+    
+    def get_default_symbols(self) -> list:
+        """기본 NASDAQ 종목 목록 (watchlist 로드 실패시 사용)"""
+        return [
             'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'NFLX',
             'ADBE', 'CRM', 'ORCL', 'INTC', 'AMD', 'QCOM', 'AVGO', 'TXN'
         ]
+    
+    def reload_watchlist(self):
+        """watchlist 재로드 (런타임 중 관심종목 변경 반영)"""
+        print("🔄 watchlist 재로드 중...")
+        old_count = len(self.watchlist_symbols)
+        self.watchlist_symbols = self.load_watchlist_symbols()
+        new_count = len(self.watchlist_symbols)
         
-        print(f"📊 {len(self.nasdaq_symbols)}개 종목 실시간 데이터 수집 준비 완료")
+        if old_count != new_count:
+            print(f"📊 watchlist 변경: {old_count} → {new_count}개 종목")
+        else:
+            print(f"📊 watchlist 동일: {new_count}개 종목")
     
     async def produce_kis_data(self, symbol: str) -> bool:
         """KIS API 데이터 수집 및 전송 (yfinance 폴백 지원)"""
@@ -438,8 +484,12 @@ class MultiSourceStockProducer:
                 cycle_count += 1
                 print(f"\n🔄 사이클 {cycle_count} 시작 - {datetime.now().strftime('%H:%M:%S')}")
                 
+                # 10사이클마다 watchlist 재로드
+                if cycle_count % 10 == 1:
+                    self.reload_watchlist()
+                
                 # 각 종목에 대해 KIS와 yfinance 데이터를 번갈아 수집
-                for i, symbol in enumerate(self.nasdaq_symbols):
+                for i, symbol in enumerate(self.watchlist_symbols):
                     if i % 2 == 0:
                         # 짝수 인덱스: KIS 데이터
                         await self.produce_kis_data(symbol)
@@ -483,9 +533,17 @@ class MultiSourceStockProducer:
     
     def close(self):
         """리소스 정리"""
-        self.producer.flush()
-        self.producer.close()
-        print("🔒 프로듀서 연결 종료")
+        try:
+            self.producer.flush()
+            self.producer.close()
+            print("🔒 Kafka 프로듀서 연결 종료")
+            
+            self.db_manager.close()
+            print("🔒 PostgreSQL 연결 종료")
+        except Exception as e:
+            print(f"⚠️ 리소스 정리 중 오류: {e}")
+        finally:
+            print("🔒 모든 연결 종료 완료")
 
 
 async def main():
