@@ -87,29 +87,49 @@ class MonitoringDashboard:
             return {}
     
     def get_data_files_info(self):
-        """데이터 파일 정보 조회"""
+        """PostgreSQL 테이블 정보 조회"""
         try:
-            files_info = []
+            from common.database import PostgreSQLManager
+            tables_info = []
             
-            if os.path.exists(self.data_path):
-                for root, dirs, files in os.walk(self.data_path):
-                    for file in files:
-                        if file.endswith(('.csv', '.json', '.parquet', '.db')):
-                            file_path = os.path.join(root, file)
-                            stat = os.stat(file_path)
-                            
-                            files_info.append({
-                                'filename': file,
-                                'path': file_path,
-                                'size_mb': stat.st_size / (1024*1024),
-                                'modified': datetime.fromtimestamp(stat.st_mtime),
-                                'type': file.split('.')[-1].upper()
-                            })
+            db_manager = PostgreSQLManager()
             
-            return sorted(files_info, key=lambda x: x['modified'], reverse=True)
+            # PostgreSQL에서 테이블 정보 조회
+            query = """
+            SELECT 
+                table_name,
+                pg_size_pretty(pg_total_relation_size(quote_ident(table_name))) as size,
+                pg_total_relation_size(quote_ident(table_name)) as size_bytes,
+                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = t.table_name) as columns_count
+            FROM information_schema.tables t
+            WHERE table_schema = 'public' 
+            AND table_type = 'BASE TABLE'
+            ORDER BY pg_total_relation_size(quote_ident(table_name)) DESC
+            """
+            
+            result = db_manager.execute_query(query)
+            
+            for _, row in result.iterrows():
+                # 각 테이블의 레코드 수 조회
+                count_query = f"SELECT COUNT(*) FROM {row['table_name']}"
+                count_result = db_manager.execute_query(count_query)
+                record_count = count_result.iloc[0, 0] if not count_result.empty else 0
+                
+                tables_info.append({
+                    'filename': row['table_name'],
+                    'path': f"PostgreSQL.{row['table_name']}",
+                    'size_mb': row['size_bytes'] / (1024*1024),
+                    'modified': datetime.now(),  # PostgreSQL은 테이블 수정 시간이 따로 없음
+                    'type': 'TABLE',
+                    'records': record_count,
+                    'columns': row['columns_count']
+                })
+            
+            db_manager.close()
+            return sorted(tables_info, key=lambda x: x['size_mb'], reverse=True)
         
         except Exception as e:
-            st.error(f"데이터 파일 정보 조회 실패: {e}")
+            st.error(f"PostgreSQL 테이블 정보 조회 실패: {e}")
             return []
     
     def get_log_files_info(self):
@@ -149,37 +169,63 @@ class MonitoringDashboard:
             st.error(f"로그 읽기 실패: {e}")
             return []
     
-    def analyze_csv_data(self, file_path):
-        """CSV 데이터 분석"""
+    def analyze_table_data(self, table_name):
+        """PostgreSQL 테이블 데이터 분석"""
         try:
-            df = pd.read_csv(file_path)
+            from common.database import PostgreSQLManager
+            db_manager = PostgreSQLManager()
+            
+            # 테이블 기본 정보 조회
+            info_query = f"""
+            SELECT 
+                COUNT(*) as row_count,
+                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = '{table_name}') as column_count
+            FROM {table_name}
+            """
+            info_result = db_manager.execute_query(info_query)
+            
+            # 컬럼 정보 조회
+            columns_query = f"""
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns 
+            WHERE table_name = '{table_name}'
+            ORDER BY ordinal_position
+            """
+            columns_result = db_manager.execute_query(columns_query)
+            
+            # 샘플 데이터 조회
+            sample_query = f"SELECT * FROM {table_name} LIMIT 5"
+            sample_result = db_manager.execute_query(sample_query)
             
             analysis = {
-                'rows': len(df),
-                'columns': len(df.columns),
-                'column_names': list(df.columns),
-                'data_types': df.dtypes.to_dict(),
-                'null_counts': df.isnull().sum().to_dict(),
-                'sample_data': df.head().to_dict('records') if len(df) > 0 else []
+                'rows': info_result.iloc[0]['row_count'] if not info_result.empty else 0,
+                'columns': info_result.iloc[0]['column_count'] if not info_result.empty else 0,
+                'column_info': columns_result.to_dict('records') if not columns_result.empty else [],
+                'sample_data': sample_result.to_dict('records') if not sample_result.empty else []
             }
             
             # 날짜 컬럼이 있으면 날짜 범위 분석
-            date_columns = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+            date_columns = [col['column_name'] for col in analysis['column_info'] 
+                          if 'date' in col['column_name'].lower() or 'time' in col['column_name'].lower()]
+            
             if date_columns:
                 for col in date_columns:
                     try:
-                        df[col] = pd.to_datetime(df[col])
-                        analysis[f'{col}_range'] = {
-                            'start': df[col].min(),
-                            'end': df[col].max()
-                        }
+                        date_range_query = f"SELECT MIN({col}) as min_date, MAX({col}) as max_date FROM {table_name}"
+                        date_result = db_manager.execute_query(date_range_query)
+                        if not date_result.empty:
+                            analysis[f'{col}_range'] = {
+                                'start': date_result.iloc[0]['min_date'],
+                                'end': date_result.iloc[0]['max_date']
+                            }
                     except:
                         pass
             
+            db_manager.close()
             return analysis
         
         except Exception as e:
-            st.error(f"CSV 분석 실패: {e}")
+            st.error(f"테이블 분석 실패: {e}")
             return {}
 
 def render_realtime_monitoring(dashboard):
@@ -227,65 +273,65 @@ def render_realtime_monitoring(dashboard):
                 delta=None
             )
     
-    # 데이터 파일 현황
-    st.subheader("📁 데이터 파일 현황")
+    # PostgreSQL 테이블 현황
+    st.subheader("� PostgreSQL 테이블 현황")
     
     files_info = dashboard.get_data_files_info()
     if files_info:
         df_files = pd.DataFrame(files_info)
         
-        # 파일 타입별 통계
+        # 테이블 타입별 통계
         col1, col2 = st.columns(2)
         
         with col1:
-            file_type_counts = df_files['type'].value_counts()
-            fig = px.pie(
-                values=file_type_counts.values,
-                names=file_type_counts.index,
-                title='파일 타입별 분포'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # 파일 크기별 분포
+            # 테이블별 레코드 수
             fig = px.bar(
                 df_files.head(10),
                 x='filename',
-                y='size_mb',
-                title='파일 크기 (MB)',
-                color='type'
+                y='records',
+                title='테이블별 레코드 수',
+                color='size_mb'
             )
             fig.update_xaxes(tickangle=45)
             st.plotly_chart(fig, use_container_width=True)
         
-        # 최근 파일 목록
-        st.write("**최근 수정된 파일들:**")
-        display_df = df_files[['filename', 'type', 'size_mb', 'modified']].head(10)
-        display_df['size_mb'] = display_df['size_mb'].round(2)
+        with col2:
+            # 테이블 크기별 분포
+            fig = px.pie(
+                df_files,
+                values='size_mb',
+                names='filename',
+                title='테이블 크기 분포 (MB)'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # PostgreSQL 테이블 상세 정보
+        st.write("**PostgreSQL 테이블 상세 정보:**")
+        display_df = df_files[['filename', 'size_mb', 'records', 'columns']].copy()
+        display_df.columns = ['테이블명', '크기(MB)', '레코드수', '컬럼수']
+        display_df['크기(MB)'] = display_df['크기(MB)'].round(2)
         st.dataframe(display_df, use_container_width=True, hide_index=True)
     else:
-        st.info("데이터 파일이 없습니다.")
+        st.info("PostgreSQL 테이블 정보를 가져올 수 없습니다.")
 
 def render_performance_analysis(dashboard):
     """성능 분석 렌더링"""
     st.title("⚡ 성능 분석")
     
-    # 데이터 파일 선택
-    files_info = dashboard.get_data_files_info()
-    csv_files = [f for f in files_info if f['type'] == 'CSV']
+    # PostgreSQL 테이블 선택
+    tables_info = dashboard.get_data_files_info()
     
-    if csv_files:
-        selected_file = st.selectbox(
-            "분석할 데이터 파일 선택:",
-            options=[f['path'] for f in csv_files],
-            format_func=lambda x: os.path.basename(x)
+    if tables_info:
+        selected_table = st.selectbox(
+            "분석할 PostgreSQL 테이블 선택:",
+            options=[t['filename'] for t in tables_info],
         )
         
-        if selected_file:
-            st.subheader(f"📊 데이터 분석: {os.path.basename(selected_file)}")
+        if selected_table:
+            st.subheader(f"📊 테이블 분석: {selected_table}")
             
-            # 데이터 분석 실행
-            analysis = dashboard.analyze_csv_data(selected_file)
+            # 테이블 분석 실행
+            analysis = dashboard.analyze_table_data(selected_table)
             
             if analysis:
                 # 기본 정보

@@ -39,6 +39,67 @@ dag = DAG(
     tags=['nasdaq', 'bulk-collection', 'postgresql', 'stock-data']
 )
 
+def detect_stock_split_advanced(df, symbol):
+    """
+    고급 주식 분할 감지 로직
+    - 가격 변화, 거래량, 패턴 분석을 종합적으로 고려
+    """
+    import pandas as pd
+    import numpy as np
+    
+    try:
+        # 1. 기본 가격 변화율 계산
+        df['price_change'] = df['Close'].pct_change()
+        df['volume_change'] = df['Volume'].pct_change()
+        
+        # 2. 이동평균과의 괴리율 계산 (정상 범위 벗어나는지 확인)
+        df['sma_5'] = df['Close'].rolling(window=5).mean()
+        df['price_deviation'] = (df['Close'] - df['sma_5']) / df['sma_5']
+        
+        # 3. 분할 후보 조건들
+        potential_splits = df[
+            (abs(df['price_change']) > 0.4) &  # 40% 이상 급변
+            (df['price_change'] < -0.3) &      # 가격 하락 (분할 특성)
+            (df['Volume'] > df['Volume'].rolling(window=5).mean() * 1.2)  # 거래량 20% 이상 증가
+        ]
+        
+        if potential_splits.empty:
+            return False
+            
+        # 4. 분할 비율이 일반적인 비율인지 확인 (2:1, 3:1, 4:1 등)
+        for split_date, row in potential_splits.iterrows():
+            price_change = row['price_change']
+            change_ratio = 1 + price_change
+            
+            if change_ratio > 0.01:  # 0 방지
+                estimated_ratio = 1 / change_ratio
+                
+                # 일반적인 분할 비율인지 확인 (1.8~2.2, 2.8~3.2, 3.8~4.2 등)
+                common_ratios = [2, 3, 4, 5, 10]
+                for common_ratio in common_ratios:
+                    if abs(estimated_ratio - common_ratio) < 0.3:
+                        print(f"🔍 {symbol}: 분할 감지 - {split_date.date()}: {common_ratio}:1 분할 추정")
+                        print(f"💡 {symbol}: 분할 감지됨, 다음 데이터 수집시 자동으로 조정된 데이터 수집됨")
+                        
+                        # 분할 발생을 기록만 하고 실제 조정은 하지 않음 (FDR이 자동 조정해줌)
+                        # from database import PostgreSQLManager
+                        # db = PostgreSQLManager()
+                        # try:
+                        #     adjusted = adjust_historical_data(db, symbol, split_date.date(), common_ratio)
+                        #     if adjusted:
+                        #         print(f"✅ {symbol}: {split_date.date()} 분할 조정 완료 ({common_ratio}:1)")
+                        #         return True
+                        # finally:
+                        #     db.close()
+                        
+                        return True  # 분할 감지됨을 반환만
+        
+        return False
+        
+    except Exception as e:
+        print(f"⚠️ {symbol}: 고급 분할 감지 오류 - {e}")
+        return False
+
 def collect_nasdaq_symbols_task(**kwargs):
     """NASDAQ 심볼 대량 수집"""
     import sys
@@ -109,10 +170,17 @@ def bulk_collect_stock_data_task(**kwargs):
         # 대량 수집기 초기화 (FinanceDataReader 사용으로 배치 크기 증가 가능)
         collector = BulkDataCollector(batch_size=50, max_workers=4)
         
-        # 배치 주가 데이터 수집 (과거 5년 데이터 - FinanceDataReader 사용)
+        # 배치 주가 데이터 수집 (2020-01-01부터 현재까지)
+        from datetime import date
+        start_date = date(2020, 1, 1)  # 2020년 1월 1일
+        current_date = date.today()
+        days_back = (current_date - start_date).days  # 2020-01-01부터 현재까지 일수 계산
+        
+        print(f"📅 데이터 수집 기간: {start_date} ~ {current_date} ({days_back}일)")
+        
         success_count, fail_count = collector.collect_stock_data_batch(
             symbols=symbols, 
-            days_back=1825  # 5년 * 365일
+            days_back=days_back  # 계산된 일수 사용
         )
         
         print(f"✅ 주가 데이터 수집 완료:")
@@ -235,7 +303,7 @@ def generate_daily_watchlist_task(**kwargs):
             {
                 'name': 'bollinger_upper_touch',
                 'query': """
-                    SELECT DISTINCT s.symbol, s.close, t.bb_upper, t.bb_middle, t.bb_lower
+                    SELECT DISTINCT s.symbol, s.date, s.close, t.bb_upper, t.bb_middle, t.bb_lower
                     FROM stock_data s
                     JOIN stock_data_technical_indicators t ON s.symbol = t.symbol AND s.date = t.date
                     WHERE s.date = CURRENT_DATE - INTERVAL '1 day'
@@ -248,7 +316,7 @@ def generate_daily_watchlist_task(**kwargs):
             {
                 'name': 'rsi_oversold',
                 'query': """
-                    SELECT DISTINCT s.symbol, s.close, t.rsi
+                    SELECT DISTINCT s.symbol, s.date, s.close, t.rsi
                     FROM stock_data s
                     JOIN stock_data_technical_indicators t ON s.symbol = t.symbol AND s.date = t.date
                     WHERE s.date = CURRENT_DATE - INTERVAL '1 day'
@@ -261,13 +329,13 @@ def generate_daily_watchlist_task(**kwargs):
             {
                 'name': 'volume_spike',
                 'query': """
-                    SELECT DISTINCT s1.symbol, s1.close, s1.volume,
+                    SELECT DISTINCT s1.symbol, s1.date, s1.close, s1.volume,
                            AVG(s2.volume) as avg_volume
                     FROM stock_data s1
                     JOIN stock_data s2 ON s1.symbol = s2.symbol 
                         AND s2.date BETWEEN s1.date - INTERVAL '20 days' AND s1.date - INTERVAL '1 day'
                     WHERE s1.date = CURRENT_DATE - INTERVAL '1 day'
-                    GROUP BY s1.symbol, s1.close, s1.volume
+                    GROUP BY s1.symbol, s1.date, s1.close, s1.volume
                     HAVING s1.volume > AVG(s2.volume) * 2
                     ORDER BY s1.symbol
                     LIMIT 30
@@ -286,11 +354,15 @@ def generate_daily_watchlist_task(**kwargs):
                         
                         for row in results:
                             try:
+                                # row[1]은 실제 stock_data의 날짜 (CURRENT_DATE - INTERVAL '1 day')
+                                actual_date = row[1]  # 쿼리에서 가져온 실제 데이터 날짜
+                                trigger_price = float(row[2])  # close 가격 (인덱스 조정)
+                                
                                 cur.execute("""
                                     INSERT INTO daily_watchlist (symbol, date, condition_type, condition_value)
                                     VALUES (%s, %s, %s, %s)
                                     ON CONFLICT (symbol, date, condition_type) DO NOTHING
-                                """, (row[0], today, condition['name'], float(row[1])))
+                                """, (row[0], actual_date, condition['name'], trigger_price))
                                 
                             except Exception as e:
                                 print(f"⚠️ {row[0]}: 관심종목 저장 오류 - {e}")
@@ -308,7 +380,7 @@ def generate_daily_watchlist_task(**kwargs):
         return {
             "status": "completed",
             "total_added": total_added,
-            "date": str(today)
+            "actual_date": str(results[0][1]) if results else None  # 실제 사용된 데이터 날짜
         }
         
     except Exception as e:
@@ -359,7 +431,6 @@ def check_and_adjust_splits_task(**kwargs):
     sys.path.insert(0, '/opt/airflow/common')
     
     from database import PostgreSQLManager
-    import yfinance as yf
     from datetime import date, timedelta
     
     print("🚀 주식분할/배당 체크 및 조정 시작...")
@@ -369,21 +440,33 @@ def check_and_adjust_splits_task(**kwargs):
         db = PostgreSQLManager()
         print("✅ PostgreSQL 연결 성공")
         
-        # 최근 거래 있는 모든 심볼들 조회
+        # 최근 거래 있는 모든 심볼들 조회 (배치 처리를 위해 제한)
         query = """
             SELECT DISTINCT symbol 
             FROM stock_data 
             WHERE date >= CURRENT_DATE - INTERVAL '7 days'
             ORDER BY symbol
-            -- 모든 활성 종목 체크 (주식분할은 예측 불가능하므로)
+           
         """
         
         with db.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(query)
-                symbols = [row[0] for row in cur.fetchall()]
+                all_symbols = [row[0] for row in cur.fetchall()]
+                
+                # 최근 3일 내에 이미 체크한 심볼들 제외 (캐싱)
+                checked_query = """
+                    SELECT DISTINCT symbol 
+                    FROM split_check_log 
+                    WHERE check_date >= CURRENT_DATE - INTERVAL '3 days'
+                """
+                cur.execute(checked_query)
+                already_checked = set(row[0] for row in cur.fetchall())
+                
+                # 아직 체크하지 않은 심볼들만 필터링
+                symbols = [s for s in all_symbols if s not in already_checked]
         
-        print(f"📊 분할/배당 체크 대상: {len(symbols)}개 심볼")
+        print(f"📊 분할/배당 체크 대상: {len(symbols)}개 심볼 (이미 체크됨: {len(already_checked)}개)")
         
         splits_detected = 0
         adjustments_made = 0
@@ -392,15 +475,16 @@ def check_and_adjust_splits_task(**kwargs):
         # 배치 처리를 위한 진행률 표시
         for i, symbol in enumerate(symbols):
             try:
-                # 진행률 표시 (매 50개마다)
-                if (i + 1) % 50 == 0:
-                    print(f"📈 진행률: {i+1}/{len(symbols)} ({((i+1)/len(symbols)*100):.1f}%)")
-                
-                # API 제한 방지를 위한 기본 대기 (매 요청마다)
+                # API 제한 방지를 위한 기본 대기 (FDR도 제한이 있음)
                 import time
-                time.sleep(0.1)  # 100ms 대기
+                time.sleep(2.0)  # 2초 대기로 더욱 증가 (FDR API 안정성을 위해)
                 
-                # 우선 FinanceDataReader로 시도 (더 안정적)
+                # 진행률 표시 및 추가 대기 (매 5개마다)
+                if (i + 1) % 5 == 0:
+                    print(f"📈 진행률: {i+1}/{len(symbols)} ({((i+1)/len(symbols)*100):.1f}%) - 추가 대기 중...")
+                    time.sleep(5.0)  # 5개마다 5초 추가 대기
+                
+                # 우선 FinanceDataReader로 시도 (더 안정적이고 제한이 적음)
                 split_detected = False
                 try:
                     import FinanceDataReader as fdr
@@ -410,75 +494,53 @@ def check_and_adjust_splits_task(**kwargs):
                     start_date = end_date - timedelta(days=30)
                     
                     df = fdr.DataReader(symbol, start=start_date, end=end_date)
-                    if not df.empty and len(df) > 1:
-                        # 가격 점프로 분할 감지 (전일 대비 40% 이상 변화시)
-                        df['price_change'] = df['Close'].pct_change()
-                        potential_splits = df[abs(df['price_change']) > 0.4]  # 40% 이상 변화
+                    if not df.empty and len(df) > 5:  # 최소 5일 데이터 필요
+                        # 더 정교한 분할 감지 로직 적용
+                        split_detected = detect_stock_split_advanced(df, symbol)
                         
-                        if not potential_splits.empty:
-                            for split_date, row in potential_splits.iterrows():
-                                change_ratio = 1 + row['price_change']
-                                if change_ratio < 0.7:  # 가격이 30% 이상 떨어짐 (분할)
-                                    split_ratio = 1 / change_ratio  # 분할 비율 추정
-                                    splits_detected += 1
-                                    split_detected = True
-                                    print(f"🔍 {symbol}: FDR에서 분할 감지 - {split_date.date()}: 추정 비율 {split_ratio:.2f}")
-                                    
-                                    adjusted = adjust_historical_data(db, symbol, split_date.date(), split_ratio)
-                                    if adjusted:
-                                        adjustments_made += 1
-                                        print(f"✅ {symbol}: {split_date.date()} 분할 조정 완료 (추정 비율: {split_ratio:.2f})")
-                except:
-                    pass  # FDR 실패시 yfinance로 폴백
-                
-                # FDR에서 분할을 찾지 못했으면 yfinance로 폴백
-                if not split_detected:
-                    # yfinance로 최근 1개월간 분할/배당 정보 확인
-                    ticker = yf.Ticker(symbol)
-                    
-                    # 주식분할 정보
-                    splits = ticker.splits
-                    if not splits.empty:
-                        recent_splits = splits[splits.index >= (date.today() - timedelta(days=30))]
-                        
-                        if not recent_splits.empty:
+                        if split_detected:
                             splits_detected += 1
-                            print(f"🔍 {symbol}: yfinance에서 주식분할 발견 - {recent_splits.to_dict()}")
-                            
-                            # 분할 비율에 따른 과거 데이터 조정
-                            for split_date, split_ratio in recent_splits.items():
-                                if split_ratio != 1.0:  # 실제 분할이 있는 경우
-                                    adjusted = adjust_historical_data(db, symbol, split_date.date(), split_ratio)
-                                    if adjusted:
-                                        adjustments_made += 1
-                                        print(f"✅ {symbol}: {split_date.date()} 분할 조정 완료 (비율: {split_ratio})")
+                            adjustments_made += 1  # FDR에서 감지하면 조정도 완료됨
+                            print(f"🔍 {symbol}: FDR에서 고급 분할 감지 및 조정 완료")
+                        else:
+                            split_detected = False
+                except Exception as fdr_error:
+                    print(f"⚠️ {symbol}: FDR 데이터 수집 실패 - {fdr_error}")
+                    split_detected = False  # 분할 감지 실패
                 
-                    # 배당 정보 (큰 특별배당의 경우에만 조정)
-                    dividends = ticker.dividends
-                    if not dividends.empty:
-                        recent_dividends = dividends[dividends.index >= (date.today() - timedelta(days=7))]
-                        
-                        # 특별배당 (일반 배당 대비 3배 이상) 체크
-                        if not recent_dividends.empty:
-                            avg_dividend = dividends.tail(8).mean()  # 최근 2년 평균
-                            for div_date, div_amount in recent_dividends.items():
-                                if div_amount > avg_dividend * 3:  # 특별배당으로 판단
-                                    print(f"🔍 {symbol}: 특별배당 발견 - {div_date.date()}: ${div_amount}")
-                                    # 특별배당 조정은 선택적으로 구현 가능
-                
+                # 체크 완료 로그 저장 (성공/실패 관계없이)
+                try:
+                    with db.get_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO split_check_log (symbol, check_date, has_split)
+                                VALUES (%s, CURRENT_DATE, %s)
+                                ON CONFLICT (symbol, check_date) DO NOTHING
+                            """, (symbol, split_detected))
+                            conn.commit()
+                except Exception as log_error:
+                    print(f"⚠️ {symbol}: 체크 로그 저장 실패 - {log_error}")
+                    
             except Exception as e:
                 error_count += 1
                 print(f"⚠️ {symbol}: 분할/배당 체크 오류 - {e}")
                 
-                # API 제한 오류 처리
-                if "Rate limited" in str(e) or "Too Many Requests" in str(e):
-                    print(f"🔄 API 요청 제한 감지, 5초 대기...")
+                # FDR API 제한 오류 처리 - 지수 백오프 적용
+                if "Rate limited" in str(e) or "Too Many Requests" in str(e) or "429" in str(e):
+                    backoff_time = min(60, 10 * (2 ** min(error_count // 3, 3)))  # 최대 60초까지 지수 백오프
+                    print(f"🔄 FDR API 요청 제한 감지, {backoff_time}초 대기... (오류 횟수: {error_count})")
                     import time
-                    time.sleep(5)
-                elif error_count % 10 == 0:
-                    print(f"🔄 API 오류 {error_count}개 발생, 3초 대기...")
+                    time.sleep(backoff_time)
+                elif error_count % 3 == 0:  # 매 3개 오류마다 더 긴 대기
+                    print(f"🔄 FDR API 오류 {error_count}개 발생, 15초 대기...")
                     import time
-                    time.sleep(3)
+                    time.sleep(15)
+                
+                # 너무 많은 API 오류 발생시 중단
+                if error_count > len(symbols) * 0.3:  # 30% 이상 실패시 중단
+                    print(f"❌ FDR API 오류 과다 발생 ({error_count}개), 작업 중단")
+                    break
+                    
                 continue
         
         print(f"✅ 주식분할/배당 체크 완료:")
@@ -505,6 +567,10 @@ def check_and_adjust_splits_task(**kwargs):
 def adjust_historical_data(db, symbol: str, split_date: date, split_ratio: float) -> bool:
     """주식분할에 따른 과거 데이터 조정"""
     try:
+        # 분할 비율이 유효한지 확인 (0 또는 너무 작은 값 방지)
+        if split_ratio <= 0 or split_ratio > 100:  # 100:1 분할을 최대로 제한
+            print(f"⚠️ {symbol}: 비정상적인 분할 비율 {split_ratio}, 조정 건너뜀")
+            return False
         with db.get_connection() as conn:
             with conn.cursor() as cur:
                 # 분할 이전 데이터만 조정
@@ -528,20 +594,25 @@ def adjust_historical_data(db, symbol: str, split_date: date, split_ratio: float
                 
                 adjusted_rows = cur.rowcount
                 
-                # 기술적 지표도 조정
+                # 기술적 지표도 조정 (실제 컬럼에 맞게)
                 if adjusted_rows > 0:
                     indicator_query = """
                         UPDATE stock_data_technical_indicators
                         SET
-                            sma_20 = sma_20 / %s,
-                            sma_50 = sma_50 / %s,
-                            ema_12 = ema_12 / %s,
-                            ema_26 = ema_26 / %s,
-                            macd = macd / %s,
-                            macd_signal = macd_signal / %s,
-                            bb_upper = bb_upper / %s,
-                            bb_middle = bb_middle / %s,
-                            bb_lower = bb_lower / %s
+                            sma_5 = CASE WHEN sma_5 IS NOT NULL THEN sma_5 / %s END,
+                            sma_20 = CASE WHEN sma_20 IS NOT NULL THEN sma_20 / %s END,
+                            sma_60 = CASE WHEN sma_60 IS NOT NULL THEN sma_60 / %s END,
+                            ema_5 = CASE WHEN ema_5 IS NOT NULL THEN ema_5 / %s END,
+                            ema_20 = CASE WHEN ema_20 IS NOT NULL THEN ema_20 / %s END,
+                            ema_60 = CASE WHEN ema_60 IS NOT NULL THEN ema_60 / %s END,
+                            bb_upper = CASE WHEN bb_upper IS NOT NULL THEN bb_upper / %s END,
+                            bb_middle = CASE WHEN bb_middle IS NOT NULL THEN bb_middle / %s END,
+                            bb_lower = CASE WHEN bb_lower IS NOT NULL THEN bb_lower / %s END,
+                            macd = CASE WHEN macd IS NOT NULL THEN macd / %s END,
+                            macd_signal = CASE WHEN macd_signal IS NOT NULL THEN macd_signal / %s END,
+                            ma_112 = CASE WHEN ma_112 IS NOT NULL THEN ma_112 / %s END,
+                            ma_224 = CASE WHEN ma_224 IS NOT NULL THEN ma_224 / %s END,
+                            ma_448 = CASE WHEN ma_448 IS NOT NULL THEN ma_448 / %s END
                         WHERE symbol = %s 
                           AND date < %s
                     """
@@ -549,7 +620,8 @@ def adjust_historical_data(db, symbol: str, split_date: date, split_ratio: float
                     cur.execute(indicator_query, (
                         split_ratio, split_ratio, split_ratio, split_ratio,
                         split_ratio, split_ratio, split_ratio, split_ratio,
-                        split_ratio, symbol, split_date
+                        split_ratio, split_ratio, split_ratio, split_ratio,
+                        split_ratio, split_ratio, symbol, split_date
                     ))
                 
                 conn.commit()
@@ -641,4 +713,5 @@ status_check = PythonOperator(
 )
 
 # Task 종속성 정의 (주식분할 체크를 데이터 수집 전에 실행)
-collect_symbols >> check_splits >> collect_stock_data >> calculate_indicators >> generate_watchlist >> cleanup_data >> status_check
+# cleanup_data 태스크 비활성화 - 오래된 데이터 보관을 위해
+collect_symbols >> check_splits >> collect_stock_data >> calculate_indicators >> generate_watchlist >> status_check

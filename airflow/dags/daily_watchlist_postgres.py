@@ -16,9 +16,80 @@ if '/home/grey1/stock-kafka3/common' not in sys.path:
     sys.path.insert(0, '/home/grey1/stock-kafka3/common')
 
 from technical_scanner_postgres import TechnicalScannerPostgreSQL
+import pytz
+
+def market_aware_setup(**context):
+    """시장 시간대별 스캔 강도 결정"""
+    
+    # 현재 미국 동부 시간 (NYSE/NASDAQ 기준)
+    est = pytz.timezone('US/Eastern')
+    current_est = datetime.now(est)
+    current_hour = current_est.hour
+    current_minute = current_est.minute
+    weekday = current_est.weekday()  # 0=월요일, 6=일요일
+    
+    # 주말은 LOW 강도로 고정
+    if weekday >= 5:  # 토요일, 일요일
+        scan_intensity = 'LOW'
+        conditions = ['bollinger_bands']
+        reason = "주말 - 최소 모니터링"
+    else:
+        # 평일 시간대별 분류
+        if 9 <= current_hour < 16:  # 09:30-16:00 정규 거래시간
+            if current_hour == 9 and current_minute < 30:
+                # 9:00-9:30은 프리마켓 마지막
+                scan_intensity = 'MEDIUM'
+                conditions = ['bollinger_bands', 'volume_spike']
+                reason = "프리마켓 마지막 30분"
+            else:
+                # 정규 거래시간
+                scan_intensity = 'HIGH'
+                conditions = ['bollinger_bands', 'rsi_oversold', 'macd_bullish', 'volume_spike']
+                reason = "정규 거래시간 - 최고 활동성"
+                
+        elif 4 <= current_hour < 9 or 16 <= current_hour <= 20:
+            # 프리마켓(4:00-9:30) 또는 애프터마켓(16:00-20:00)
+            scan_intensity = 'MEDIUM'
+            conditions = ['bollinger_bands', 'volume_spike']
+            reason = "확장 거래시간 - 중간 모니터링"
+            
+        else:  # 20:00-04:00 시장 완전 마감
+            scan_intensity = 'LOW'
+            conditions = ['bollinger_bands']
+            reason = "시장 마감 - 최소 모니터링"
+    
+    print(f"🕐 현재 EST: {current_est.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⚡ 스캔 강도: {scan_intensity}")
+    print(f"🎯 활성 조건: {conditions}")
+    print(f"💡 이유: {reason}")
+    
+    # XCom으로 후속 태스크에 전달
+    context['task_instance'].xcom_push(key='scan_conditions', value=conditions)
+    context['task_instance'].xcom_push(key='scan_intensity', value=scan_intensity)
+    context['task_instance'].xcom_push(key='scan_reason', value=reason)
+    
+    return f"✅ {scan_intensity} 강도 설정: {len(conditions)}개 조건"
 
 def scan_and_update_watchlist(**context):
-    """볼린저 밴드 상단 터치 종목 스캔 및 관심종목 업데이트 (PostgreSQL)"""
+    """시장 상황에 따른 동적 볼린저 밴드 스캔 (PostgreSQL)"""
+    
+    # 이전 태스크에서 스캔 조건 가져오기
+    scan_conditions = context['task_instance'].xcom_pull(
+        task_ids='market_aware_setup', 
+        key='scan_conditions'
+    ) or ['bollinger_bands']  # 기본값
+    
+    scan_intensity = context['task_instance'].xcom_pull(
+        task_ids='market_aware_setup', 
+        key='scan_intensity'
+    ) or 'MEDIUM'
+    
+    # 볼린저 밴드 조건이 포함된 경우에만 실행
+    if 'bollinger_bands' not in scan_conditions:
+        print(f"⏭️ {scan_intensity} 강도에서 볼린저 밴드 스캔 제외됨")
+        context['task_instance'].xcom_push(key='watchlist_count', value=0)
+        context['task_instance'].xcom_push(key='scan_date', value=str((datetime.now() - timedelta(days=1)).date()))
+        return f"✅ 스캔 스킵 ({scan_intensity})"
     
     # 스캔 날짜 (어제 날짜 사용 - 장마감 후 처리)
     scan_date = (datetime.now() - timedelta(days=1)).date()
@@ -27,8 +98,28 @@ def scan_and_update_watchlist(**context):
         # PostgreSQL 기술적 스캐너 초기화
         scanner = TechnicalScannerPostgreSQL()
         
-        # 볼린저 밴드 상단 터치 종목 스캔
-        watchlist_signals = scanner.update_daily_watchlist(scan_date)
+        # 강도별 스캔 파라미터 조정
+        if scan_intensity == 'HIGH':
+            # 정규 거래시간 - 더 민감한 조건
+            threshold = 0.995  # 볼린저 상단의 99.5% 터치
+            limit = 50         # 최대 50개 종목
+        elif scan_intensity == 'MEDIUM':
+            # 확장 거래시간 - 적당한 조건  
+            threshold = 0.99   # 볼린저 상단의 99% 터치
+            limit = 30         # 최대 30개 종목
+        else:  # LOW
+            # 시장 마감 시간 - 보수적 조건
+            threshold = 0.985  # 볼린저 상단의 98.5% 터치  
+            limit = 20         # 최대 20개 종목
+        
+        print(f"🎯 {scan_intensity} 강도 스캔: 임계값={threshold:.3f}, 최대={limit}개")
+        
+        # 볼린저 밴드 상단 터치 종목 스캔 (강도별 조정)
+        watchlist_signals = scanner.update_daily_watchlist(
+            scan_date, 
+            bb_threshold=threshold,
+            limit=limit
+        )
         
         print(f"📈 {scan_date} 볼린저 밴드 상단 터치 종목: {len(watchlist_signals)}개")
         
@@ -41,22 +132,49 @@ def scan_and_update_watchlist(**context):
         context['task_instance'].xcom_push(key='scan_date', value=str(scan_date))
         
         scanner.close()
-        return f"✅ 관심종목 스캔 완료: {len(watchlist_signals)}개"
+        return f"✅ {scan_intensity} 강도 스캔 완료: {len(watchlist_signals)}개"
         
     except Exception as e:
         print(f"❌ 관심종목 스캔 실패: {str(e)}")
         raise
 
 def scan_rsi_oversold(**context):
-    """RSI 과매도 종목 스캔 (PostgreSQL)"""
+    """시장 강도에 따른 RSI 과매도 스캔 (PostgreSQL)"""
+    
+    # 시장 강도 확인
+    scan_conditions = context['task_instance'].xcom_pull(
+        task_ids='market_aware_setup', 
+        key='scan_conditions'
+    ) or []
+    
+    scan_intensity = context['task_instance'].xcom_pull(
+        task_ids='market_aware_setup', 
+        key='scan_intensity'
+    ) or 'MEDIUM'
+    
+    # RSI 스캔이 활성화된 경우에만 실행 (HIGH 강도에만)
+    if 'rsi_oversold' not in scan_conditions:
+        print(f"⏭️ {scan_intensity} 강도에서 RSI 스캔 제외됨")
+        context['task_instance'].xcom_push(key='rsi_count', value=0)
+        return f"✅ RSI 스캔 스킵 ({scan_intensity})"
     
     scan_date = (datetime.now() - timedelta(days=1)).date()
     
     try:
         scanner = TechnicalScannerPostgreSQL()
         
+        # HIGH 강도에서만 실행되므로 더 적극적인 파라미터
+        rsi_threshold = 35    # HIGH 강도에서는 RSI 35 이하까지 확장
+        limit = 25           # 최대 25개 종목
+        
+        print(f"🎯 {scan_intensity} RSI 스캔: RSI≤{rsi_threshold}, 최대={limit}개")
+        
         # RSI 과매도 신호 스캔
-        rsi_signals = scanner.scan_rsi_oversold_signals(scan_date)
+        rsi_signals = scanner.scan_rsi_oversold_signals(
+            scan_date,
+            rsi_threshold=rsi_threshold,
+            limit=limit
+        )
         
         print(f"📉 {scan_date} RSI 과매도 종목: {len(rsi_signals)}개")
         
@@ -571,6 +689,25 @@ summary_task = PythonOperator(
     """
 )
 
+# 시장 상황 인식 태스크 추가
+market_setup_task = PythonOperator(
+    task_id='market_aware_setup',
+    python_callable=market_aware_setup,
+    dag=dag,
+    doc_md="""
+    ## 시장 시간대별 스캔 강도 설정
+    
+    - 현재 EST 시간대 확인
+    - HIGH/MEDIUM/LOW 강도 결정
+    - 활성화할 스캔 조건 선택
+    
+    ### 강도별 기준:
+    - **HIGH** (09:30-16:00 EST): 정규 거래시간, 모든 조건 활성화
+    - **MEDIUM** (04:00-09:30, 16:00-20:00 EST): 확장 거래시간, 핵심 조건만 
+    - **LOW** (20:00-04:00 EST, 주말): 시장 마감, 최소 모니터링
+    """
+)
+
 # 새로운 태스크들 추가
 generate_additional_task = PythonOperator(
     task_id='generate_additional_watchlist',
@@ -597,7 +734,8 @@ redis_sync_task = PythonOperator(
     """
 )
 
-# 태스크 의존성 설정 (ExternalTaskSensor 제거하고 독립적으로 실행)
-# 추가 관심종목 생성 → 기존 스캔들과 병렬 실행 → Redis 동기화 → 정리 → 요약
-generate_additional_task >> [scan_bollinger_task, scan_rsi_task, scan_macd_task, top_performers_task]
-[scan_bollinger_task, scan_rsi_task, scan_macd_task, top_performers_task] >> redis_sync_task >> cleanup_task >> summary_task
+# 태스크 의존성 설정 - 시장 상황 인식 후 조건부 스캔
+# 1. 시장 상황 분석 → 2. 조건부 스캔들 병렬 실행 → 3. Redis 동기화 → 4. 정리 및 요약
+
+market_setup_task >> [generate_additional_task, scan_bollinger_task, scan_rsi_task, scan_macd_task, top_performers_task]
+[generate_additional_task, scan_bollinger_task, scan_rsi_task, scan_macd_task, top_performers_task] >> redis_sync_task >> cleanup_task >> summary_task

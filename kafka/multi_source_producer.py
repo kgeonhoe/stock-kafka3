@@ -404,8 +404,8 @@ class MultiSourceStockProducer:
             
             result = self.db_manager.execute_query(query)
             
-            if result:
-                symbols = [row[0] for row in result]
+            if result is not None and not result.empty:
+                symbols = [row[0] for row in result.values]
                 print(f"✅ PostgreSQL daily_watchlist에서 {len(symbols)}개 종목 로드: {symbols[:5]}{'...' if len(symbols) > 5 else ''}")
                 return symbols
             else:

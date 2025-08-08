@@ -177,33 +177,87 @@ def process_realtime_data_with_spark():
                         else:
                             print(f"  ❌ Redis 저장 실패: {symbol}")
                         
-                        # 2. 기술적 지표 계산 (과거 데이터 + 현재 가격)
+                        # 2. 기술적 지표 계산 (PostgreSQL에서 과거 데이터 가져와서 계산)
                         try:
-                            indicators = indicator_calculator.calculate_all_indicators(
-                                symbol, 
-                                current_price=current_price
-                            )
+                            # PostgreSQL에서 최근 60일 데이터 조회
+                            db = indicator_calculator.db  # PostgreSQL 연결 재사용
                             
-                            if indicators:
-                                # Redis에 기술적 지표 저장
-                                redis_manager.store_technical_indicators(symbol, indicators)
-                                indicator_count += 1
+                            query = """
+                                SELECT symbol, date, open, high, low, close, volume
+                                FROM stock_data
+                                WHERE symbol = %s
+                                  AND date >= CURRENT_DATE - INTERVAL '60 days'
+                                ORDER BY date
+                                LIMIT 60
+                            """
+                            
+                            stock_data = []
+                            with db.get_connection() as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute(query, (symbol,))
+                                    rows = cur.fetchall()
+                                    
+                                    for row in rows:
+                                        stock_data.append({
+                                            'symbol': row[0],
+                                            'date': row[1],
+                                            'open': float(row[2]) if row[2] else 0,
+                                            'high': float(row[3]) if row[3] else 0, 
+                                            'low': float(row[4]) if row[4] else 0,
+                                            'close': float(row[5]) if row[5] else 0,
+                                            'volume': int(row[6]) if row[6] else 0
+                                        })
+                            
+                            # 현재 가격을 마지막 데이터로 추가 (오늘 데이터)
+                            if stock_data and current_price:
+                                from datetime import date
+                                today_data = stock_data[-1].copy()  # 어제 데이터 기준
+                                today_data.update({
+                                    'date': date.today(),
+                                    'close': current_price,
+                                    'high': max(today_data['high'], current_price),
+                                    'low': min(today_data['low'], current_price)
+                                })
+                                stock_data.append(today_data)
+                            
+                            # 기술적 지표 계산
+                            if len(stock_data) >= 20:  # 최소 20일 데이터 필요
+                                indicators_list = indicator_calculator.calculate_all_indicators(stock_data)
                                 
-                                # 주요 지표 로깅
-                                rsi = indicators.get('rsi')
-                                macd = indicators.get('macd')
-                                sentiment = indicators.get('overall_sentiment', 'neutral')
-                                strength = indicators.get('strength', 0)
-                                macd_str = f"{macd:.4f}" if macd is not None else "None"
-                                print(f"  📈 {symbol} 지표: RSI={rsi}, MACD={macd_str}, 신호={sentiment}({strength})")
-                                
-                                # 중요한 매매 신호만 출력
-                                signals = indicators.get('signals', [])
-                                if signals and abs(strength) > 30:  # 강한 신호만
-                                    print(f"  🚨 {symbol} 중요신호: {signals[0]}")
-                                
+                                if indicators_list:
+                                    # Redis에 기술적 지표 저장 (최신 지표만)
+                                    latest_indicator = indicators_list[-1] if indicators_list else None
+                                    if latest_indicator:
+                                        # Redis에 맞는 형태로 변환
+                                        redis_indicators = {
+                                            'rsi': latest_indicator.get('rsi'),
+                                            'macd': latest_indicator.get('macd_line'),
+                                            'macd_signal': latest_indicator.get('macd_signal'),
+                                            'sma_20': latest_indicator.get('sma_20'),
+                                            'ema_12': latest_indicator.get('ema_12'),
+                                            'ema_26': latest_indicator.get('ema_26'),
+                                            'bb_upper': latest_indicator.get('bb_upper'),
+                                            'bb_middle': latest_indicator.get('bb_middle'),
+                                            'bb_lower': latest_indicator.get('bb_lower'),
+                                            'timestamp': datetime.now().isoformat()
+                                        }
+                                        
+                                        redis_manager.store_technical_indicators(symbol, redis_indicators)
+                                        indicator_count += 1
+                                        
+                                        # 주요 지표 로깅  
+                                        rsi = redis_indicators.get('rsi')
+                                        macd = redis_indicators.get('macd')
+                                        
+                                        if rsi is not None and macd is not None:
+                                            print(f"  📈 {symbol} 지표: RSI={rsi:.1f}, MACD={macd:.4f}")
+                                        else:
+                                            print(f"  📈 {symbol} 지표 저장 완료")
+                                        
+                                else:
+                                    print(f"  ⚠️ {symbol}: 기술적 지표 계산 결과 없음")
                             else:
-                                print(f"  ⚠️ {symbol}: 기술적 지표 계산 불가 (데이터 부족)")
+                                print(f"  ⚠️ {symbol}: 기술적 지표 계산 불가 (데이터 부족: {len(stock_data)}개)")
                                 
                         except Exception as indicator_error:
                             print(f"❌ {symbol} 지표 계산 실패: {indicator_error}")

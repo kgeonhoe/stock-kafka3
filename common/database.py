@@ -364,15 +364,13 @@ class PostgreSQLManager:
         """
         try:
             if PANDAS_AVAILABLE:
-                # SQLAlchemy 연결 문자열 생성 (pandas 경고 방지)
-                connection_string = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}:{self.config['port']}/{self.config['database']}"
-                
-                # pandas를 사용한 DataFrame 반환 시도
-                if params:
-                    result = pd.read_sql_query(query, connection_string, params=params)
-                else:
-                    result = pd.read_sql_query(query, connection_string)
-                return result
+                # psycopg2 연결을 사용하여 pandas DataFrame 생성
+                with self.get_connection() as conn:
+                    if params:
+                        result = pd.read_sql_query(query, conn, params=params)
+                    else:
+                        result = pd.read_sql_query(query, conn)
+                    return result
             else:
                 # pandas가 없는 경우 일반 결과 반환
                 with self.get_connection() as conn:
