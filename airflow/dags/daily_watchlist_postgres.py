@@ -114,12 +114,44 @@ def scan_and_update_watchlist(**context):
         
         print(f"🎯 {scan_intensity} 강도 스캔: 임계값={threshold:.3f}, 최대={limit}개")
         
-        # 볼린저 밴드 상단 터치 종목 스캔 (강도별 조정)
-        watchlist_signals = scanner.update_daily_watchlist(
-            scan_date, 
-            bb_threshold=threshold,
-            limit=limit
-        )
+        # 볼린저 밴드 상단 터치 종목 스캔
+        bb_signals = scanner.scan_bollinger_band_signals(scan_date)
+        
+        # 강도별 필터링 적용
+        filtered_signals = []
+        for signal in bb_signals:
+            # 임계값 조건 확인 (상단선 대비 비율)
+            if signal.get('condition_value', 0) >= threshold:
+                filtered_signals.append(signal)
+        
+        # 상위 N개로 제한
+        watchlist_signals = filtered_signals[:limit]
+        
+        # 필터링된 신호들을 데이터베이스에 저장
+        if watchlist_signals:
+            try:
+                with scanner.db.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        for signal in watchlist_signals:
+                            cur.execute("""
+                                INSERT INTO daily_watchlist 
+                                (symbol, date, condition_type, condition_value, market_cap_tier)
+                                VALUES (%s, %s, %s, %s, %s)
+                                ON CONFLICT (symbol, date, condition_type) DO UPDATE SET
+                                    condition_value = EXCLUDED.condition_value,
+                                    market_cap_tier = EXCLUDED.market_cap_tier
+                            """, (
+                                signal['symbol'],
+                                signal['date'], 
+                                signal['condition_type'],
+                                signal['condition_value'],
+                                signal.get('market_cap_tier', 3)
+                            ))
+                        conn.commit()
+                        print(f"💾 {len(watchlist_signals)}개 신호 DB 저장 완료")
+            except Exception as db_error:
+                print(f"❌ DB 저장 오류: {db_error}")
+                raise
         
         print(f"📈 {scan_date} 볼린저 밴드 상단 터치 종목: {len(watchlist_signals)}개")
         
@@ -170,11 +202,43 @@ def scan_rsi_oversold(**context):
         print(f"🎯 {scan_intensity} RSI 스캔: RSI≤{rsi_threshold}, 최대={limit}개")
         
         # RSI 과매도 신호 스캔
-        rsi_signals = scanner.scan_rsi_oversold_signals(
-            scan_date,
-            rsi_threshold=rsi_threshold,
-            limit=limit
-        )
+        all_rsi_signals = scanner.scan_rsi_oversold_signals(scan_date)
+        
+        # 강도별 필터링 적용
+        filtered_signals = []
+        for signal in all_rsi_signals:
+            # RSI 임계값 조건 확인
+            if signal.get('rsi', 100) <= rsi_threshold:
+                filtered_signals.append(signal)
+        
+        # 상위 N개로 제한
+        rsi_signals = filtered_signals[:limit]
+        
+        # 필터링된 신호들을 데이터베이스에 저장
+        if rsi_signals:
+            try:
+                with scanner.db.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        for signal in rsi_signals:
+                            cur.execute("""
+                                INSERT INTO daily_watchlist 
+                                (symbol, date, condition_type, condition_value, market_cap_tier)
+                                VALUES (%s, %s, %s, %s, %s)
+                                ON CONFLICT (symbol, date, condition_type) DO UPDATE SET
+                                    condition_value = EXCLUDED.condition_value,
+                                    market_cap_tier = EXCLUDED.market_cap_tier
+                            """, (
+                                signal['symbol'],
+                                signal['date'], 
+                                signal['condition_type'],
+                                signal['condition_value'],
+                                signal.get('market_cap_tier', 3)
+                            ))
+                        conn.commit()
+                        print(f"💾 {len(rsi_signals)}개 RSI 신호 DB 저장 완료")
+            except Exception as db_error:
+                print(f"❌ RSI 신호 DB 저장 오류: {db_error}")
+                raise
         
         print(f"📉 {scan_date} RSI 과매도 종목: {len(rsi_signals)}개")
         

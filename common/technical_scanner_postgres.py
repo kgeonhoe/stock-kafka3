@@ -22,31 +22,50 @@ class TechnicalScannerPostgreSQL:
         if scan_date is None:
             scan_date = date.today()
         
+        # 먼저 간단한 테스트 쿼리로 데이터 확인
+        test_query = """
+        SELECT COUNT(*) 
+        FROM stock_data_technical_indicators t
+        JOIN stock_data s ON t.symbol = s.symbol AND t.date = s.date
+        JOIN nasdaq_symbols n ON t.symbol = n.symbol
+        WHERE t.date = %s AND t.bb_upper IS NOT NULL
+        """
+        
+        try:
+            with self.db.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(test_query, (scan_date,))
+                    count_result = cur.fetchone()
+                    print(f"🔍 사용 가능한 데이터: {count_result[0] if count_result else 0}개")
+        except Exception as test_error:
+            print(f"⚠️ 테스트 쿼리 오류: {test_error}")
+            
         query = """
-        WITH bb_signals AS (
-            SELECT 
-                t.symbol,
-                t.date,
-                s.close,
-                t.bb_upper,
-                t.bb_middle,
-                t.bb_lower,
-                -- 상단 터치 조건: 현재가가 상단선의 98% 이상
-                CASE WHEN s.close >= t.bb_upper * 0.98 THEN 1 ELSE 0 END as upper_touch,
-                n.market_cap,
-                CASE 
-                    WHEN CAST(REPLACE(REPLACE(REPLACE(n.market_cap, '$', ''), 'B', ''), 'T', '') AS DECIMAL) >= 100 THEN 1
-                    WHEN CAST(REPLACE(REPLACE(REPLACE(n.market_cap, '$', ''), 'B', ''), 'T', '') AS DECIMAL) >= 10 THEN 2
-                    ELSE 3
-                END as tier
-            FROM stock_data_technical_indicators t
-            JOIN nasdaq_symbols n ON t.symbol = n.symbol
-            JOIN stock_data s ON t.symbol = s.symbol AND t.date = s.date
-            WHERE t.date = %s
-              AND t.bb_upper IS NOT NULL
-              AND s.close IS NOT NULL
-        )
-        SELECT * FROM bb_signals WHERE upper_touch = 1
+        SELECT 
+            t.symbol,
+            t.date,
+            s.close,
+            t.bb_upper,
+            t.bb_middle,
+            t.bb_lower,
+            CASE WHEN s.close >= t.bb_upper * 0.98 THEN 1 ELSE 0 END as upper_touch,
+            COALESCE(n.market_cap, 'N/A') as market_cap,
+            CASE 
+                WHEN n.market_cap IS NULL OR n.market_cap = '' THEN 3
+                WHEN n.market_cap ~ '^\\$[0-9]+(\\.?[0-9]*)T' THEN 1
+                WHEN n.market_cap ~ '^\\$[0-9]+(\\.?[0-9]*)B' THEN 
+                    CASE WHEN CAST(REPLACE(REPLACE(n.market_cap, '$', ''), 'B', '') AS DECIMAL) >= 100 THEN 1 ELSE 2 END
+                ELSE 3
+            END as tier
+        FROM stock_data_technical_indicators t
+        JOIN stock_data s ON t.symbol = s.symbol AND t.date = s.date
+        JOIN nasdaq_symbols n ON t.symbol = n.symbol
+        WHERE t.date = %s
+          AND t.bb_upper IS NOT NULL
+          AND s.close IS NOT NULL
+          AND s.close >= t.bb_upper * 0.98
+        ORDER BY (s.close / t.bb_upper) DESC
+        LIMIT 50
         """
         
         try:
@@ -54,19 +73,47 @@ class TechnicalScannerPostgreSQL:
                 with conn.cursor() as cur:
                     cur.execute(query, (scan_date,))
                     results = cur.fetchall()
+                    
+            print(f"🔍 볼린저 밴드 쿼리 결과: {len(results)}개 행")
+            if results:
+                print(f"🔍 첫 번째 행: {results[0]}")
+                print(f"🔍 첫 번째 행 길이: {len(results[0])}")
+                print(f"🔍 각 항목 타입: {[type(item) for item in results[0]]}")
             
             watchlist = []
-            for row in results:
-                watchlist.append({
-                    'symbol': row[0],
-                    'date': row[1],
-                    'close_price': row[2],
-                    'bb_upper': row[3],
-                    'condition_type': 'bollinger_upper_touch',
-                    'condition_value': row[2] / row[3] if row[3] else 0,  # 상단선 대비 비율
-                    'market_cap_tier': row[8]
-                })
+            for i, row in enumerate(results):
+                try:
+                    if i < 3:  # 처음 3개 행만 디버그 출력
+                        print(f"🔍 행 {i}: 길이={len(row)}, 내용={row}")
+                    
+                    # 안전하게 각 인덱스에 접근
+                    symbol = row[0] if len(row) > 0 else 'UNKNOWN'
+                    date_val = row[1] if len(row) > 1 else scan_date
+                    close_price = float(row[2]) if len(row) > 2 and row[2] else 0
+                    bb_upper = float(row[3]) if len(row) > 3 and row[3] else 0
+                    bb_middle = float(row[4]) if len(row) > 4 and row[4] else 0
+                    bb_lower = float(row[5]) if len(row) > 5 and row[5] else 0
+                    upper_touch = row[6] if len(row) > 6 else 0
+                    market_cap = row[7] if len(row) > 7 else ''
+                    tier = int(row[8]) if len(row) > 8 and row[8] else 3
+                    
+                    watchlist.append({
+                        'symbol': symbol,
+                        'date': date_val,
+                        'close_price': close_price,
+                        'bb_upper': bb_upper,
+                        'condition_type': 'bollinger_upper_touch',
+                        'condition_value': close_price / bb_upper if bb_upper > 0 else 0,
+                        'market_cap_tier': tier
+                    })
+                    
+                except (IndexError, ValueError, TypeError) as row_error:
+                    print(f"❌ 행 처리 오류 (행 {i}): {row_error}")
+                    print(f"   행 길이: {len(row) if row else 'None'}")
+                    print(f"   행 내용: {row}")
+                    continue
             
+            print(f"✅ 처리 완료: {len(watchlist)}개 신호")
             return watchlist
             
         except Exception as e:
@@ -84,7 +131,14 @@ class TechnicalScannerPostgreSQL:
             t.date,
             s.close,
             t.rsi,
-            n.market_cap
+            n.market_cap,
+            CASE 
+                WHEN n.market_cap IS NULL OR n.market_cap = '' THEN 3
+                WHEN n.market_cap ~ '^\\$[0-9]+(\\.?[0-9]*)T' THEN 1  -- Trillion
+                WHEN n.market_cap ~ '^\\$[0-9]+(\\.?[0-9]*)B' THEN 
+                    CASE WHEN CAST(REPLACE(REPLACE(n.market_cap, '$', ''), 'B', '') AS DECIMAL) >= 100 THEN 1 ELSE 2 END
+                ELSE 3
+            END as tier
         FROM stock_data_technical_indicators t
         JOIN nasdaq_symbols n ON t.symbol = n.symbol
         JOIN stock_data s ON t.symbol = s.symbol AND t.date = s.date
@@ -109,7 +163,8 @@ class TechnicalScannerPostgreSQL:
                     'rsi': row[3],
                     'condition_type': 'rsi_oversold',
                     'condition_value': row[3],
-                    'market_cap': row[4]
+                    'market_cap': row[4],
+                    'market_cap_tier': row[5]
                 })
             
             return watchlist
@@ -128,18 +183,25 @@ class TechnicalScannerPostgreSQL:
             t.symbol,
             t.date,
             s.close,
-            t.macd_line,
+            t.macd,
             t.macd_signal,
-            n.market_cap
+            n.market_cap,
+            CASE 
+                WHEN n.market_cap IS NULL OR n.market_cap = '' THEN 3
+                WHEN n.market_cap ~ '^\\$[0-9]+(\\.?[0-9]*)T' THEN 1  -- Trillion
+                WHEN n.market_cap ~ '^\\$[0-9]+(\\.?[0-9]*)B' THEN 
+                    CASE WHEN CAST(REPLACE(REPLACE(n.market_cap, '$', ''), 'B', '') AS DECIMAL) >= 100 THEN 1 ELSE 2 END
+                ELSE 3
+            END as tier
         FROM stock_data_technical_indicators t
         JOIN nasdaq_symbols n ON t.symbol = n.symbol
         JOIN stock_data s ON t.symbol = s.symbol AND t.date = s.date
         WHERE t.date = %s
-          AND t.macd_line IS NOT NULL
+          AND t.macd IS NOT NULL
           AND t.macd_signal IS NOT NULL
-          AND t.macd_line > t.macd_signal
-          AND t.macd_line > 0
-        ORDER BY (t.macd_line - t.macd_signal) DESC
+          AND t.macd > t.macd_signal
+          AND t.macd > 0
+        ORDER BY (t.macd - t.macd_signal) DESC
         """
         
         try:
@@ -154,11 +216,12 @@ class TechnicalScannerPostgreSQL:
                     'symbol': row[0],
                     'date': row[1],
                     'close_price': row[2],
-                    'macd_line': row[3],
+                    'macd': row[3],
                     'macd_signal': row[4],
                     'condition_type': 'macd_bullish',
                     'condition_value': row[3] - row[4],  # MACD 히스토그램
-                    'market_cap': row[5]
+                    'market_cap': row[5],
+                    'market_cap_tier': row[6]
                 })
             
             return watchlist

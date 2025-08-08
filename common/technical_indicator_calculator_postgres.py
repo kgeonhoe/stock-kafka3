@@ -251,8 +251,10 @@ class TechnicalIndicatorCalculatorPostgreSQL:
             
             # DataFrame 변환
             df = pd.DataFrame(stock_data)
+            self.logger.info(f"🔍 DataFrame 생성 성공, 컬럼: {list(df.columns)}")
+            
             df['date'] = pd.to_datetime(df['date'])
-            df = df.sort_values('date')
+            df = df.sort_values('date').reset_index(drop=True)  # 인덱스 리셋
             
             symbol = stock_data[0].get('symbol', '')
             indicators_list = []
@@ -261,6 +263,8 @@ class TechnicalIndicatorCalculatorPostgreSQL:
             for i, row in df.iterrows():
                 if i < 20:  # 최소 20일 데이터 필요
                     continue
+                
+                self.logger.debug(f"🔍 처리 중: {i}번째 행, 타입: {type(row)}, 인덱스: {row.index.tolist()}")
                 
                 # 현재 날짜까지의 데이터
                 current_data = df.iloc[:i+1].copy()
@@ -287,9 +291,25 @@ class TechnicalIndicatorCalculatorPostgreSQL:
                 bb_upper = bb_middle + (bb_std * 2)
                 bb_lower = bb_middle - (bb_std * 2)
                 
+                # 날짜 처리 개선
+                try:
+                    if 'date' in row.index:
+                        date_value = row['date']
+                        if hasattr(date_value, 'date'):
+                            date_value = date_value.date()
+                        elif not isinstance(date_value, str):
+                            date_value = str(date_value)
+                    else:
+                        self.logger.warning(f"⚠️ 'date' 컬럼이 row에 없음: {row.index.tolist()}")
+                        date_value = str(df.iloc[i]['date'].date() if hasattr(df.iloc[i]['date'], 'date') else df.iloc[i]['date'])
+                except Exception as date_error:
+                    self.logger.error(f"❌ 날짜 처리 오류 ({symbol}, row {i}): {date_error}")
+                    self.logger.error(f"   row 타입: {type(row)}, row 내용: {dict(row) if hasattr(row, 'to_dict') else row}")
+                    continue  # 이 행은 스킵하고 계속 진행
+                
                 indicator_data = {
                     'symbol': symbol,
-                    'date': row['date'].date(),
+                    'date': date_value,
                     'sma_20': float(sma_20) if pd.notna(sma_20) else None,
                     'ema_12': float(ema_12) if pd.notna(ema_12) else None,
                     'ema_26': float(ema_26) if pd.notna(ema_26) else None,

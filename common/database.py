@@ -414,13 +414,27 @@ class PostgreSQLManager:
         with self.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT * FROM stock_data
-                    WHERE symbol = %s
-                    ORDER BY date DESC
-                    LIMIT %s
+                    SELECT symbol, date, open, high, low, close, volume
+                    FROM (
+                        SELECT symbol, date, open, high, low, close, volume
+                        FROM stock_data
+                        WHERE symbol = %s
+                        ORDER BY date DESC
+                        LIMIT %s
+                    ) AS recent_data
+                    ORDER BY date ASC
                 """, (symbol, days))
-                result = cur.fetchall()
-                return result
+                
+                columns = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume']
+                results = []
+                
+                for row in cur.fetchall():
+                    stock_dict = {
+                        columns[i]: row[i] for i in range(len(columns))
+                    }
+                    results.append(stock_dict)
+                
+                return results
     
     def close(self):
         """연결 종료 (컨텍스트 매니저를 사용하므로 실제로는 불필요)"""

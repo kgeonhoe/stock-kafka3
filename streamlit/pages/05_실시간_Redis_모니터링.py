@@ -232,11 +232,21 @@ try:
                 ORDER BY symbol
                 """
                 result = db_manager.execute_query(query)
-                if result:
-                    valid_watchlist_symbols = set([row[0] for row in result])
-                    print(f"✅ PostgreSQL에서 {len(valid_watchlist_symbols)}개 관심종목 확인: {list(valid_watchlist_symbols)}")
+                
+                # DataFrame 체크를 올바르게 수정
+                if result is not None:
+                    if hasattr(result, 'empty'):  # DataFrame인 경우
+                        if not result.empty:
+                            valid_watchlist_symbols = set(result['symbol'].tolist())
+                            print(f"✅ PostgreSQL에서 {len(valid_watchlist_symbols)}개 관심종목 확인: {list(valid_watchlist_symbols)}")
+                        else:
+                            print("⚠️ PostgreSQL daily_watchlist가 비어있음")
+                    elif result:  # tuple/list인 경우
+                        valid_watchlist_symbols = set([row[0] for row in result])
+                        print(f"✅ PostgreSQL에서 {len(valid_watchlist_symbols)}개 관심종목 확인: {list(valid_watchlist_symbols)}")
                 else:
                     print("⚠️ PostgreSQL daily_watchlist가 비어있음")
+                    
                 db_manager.close()
             except Exception as db_e:
                 print(f"❌ PostgreSQL 관심종목 조회 실패: {db_e}")
@@ -875,13 +885,30 @@ try:
                                     try:
                                         count_query = "SELECT COUNT(*) FROM daily_watchlist"
                                         count_result = db_manager.execute_query(count_query)
-                                        total_count = count_result[0][0] if count_result else 0
+                                        
+                                        # DataFrame/tuple 안전하게 처리
+                                        total_count = 0
+                                        if count_result is not None:
+                                            if hasattr(count_result, 'iloc'):  # DataFrame
+                                                if not count_result.empty:
+                                                    total_count = count_result.iloc[0, 0]
+                                            elif count_result:  # tuple/list
+                                                total_count = count_result[0][0] if count_result else 0
+                                        
                                         print(f"[DEBUG] PostgreSQL daily_watchlist 총 레코드 수: {total_count}")
                                         
                                         if total_count > 0:
                                             sample_query = "SELECT DISTINCT symbol FROM daily_watchlist"
                                             sample_result = db_manager.execute_query(sample_query)
-                                            sample_symbols = [row[0] for row in sample_result] if sample_result else []
+                                            
+                                            sample_symbols = []
+                                            if sample_result is not None:
+                                                if hasattr(sample_result, 'empty'):  # DataFrame
+                                                    if not sample_result.empty:
+                                                        sample_symbols = sample_result['symbol'].tolist()
+                                                elif sample_result:  # tuple/list
+                                                    sample_symbols = [row[0] for row in sample_result]
+                                            
                                             print(f"[DEBUG] PostgreSQL 샘플 심볼들: {sample_symbols}")
                                         
                                         # Redis 심볼들과 비교
@@ -893,52 +920,81 @@ try:
                                     # PostgreSQL에서 실제 관심종목 성과 데이터 조회
                                     real_watchlist_sample = []
                                     
-                                    # 모든 sample_data를 사용 (7개 제한 제거)
-                                    for item in sample_data:  # 전체 종목 표시
-                                        symbol = item['Symbol']
-                                        
+                                    # PostgreSQL에서 모든 관심종목 조회 (Redis 무관)
+                                    all_symbols_query = """
+                                    SELECT DISTINCT symbol 
+                                    FROM daily_watchlist 
+                                    ORDER BY symbol
+                                    """
+                                    all_symbols_result = db_manager.execute_query(all_symbols_query)
+                                    
+                                    # DataFrame이든 tuple이든 안전하게 처리
+                                    all_db_symbols = []
+                                    if all_symbols_result is not None:
+                                        if hasattr(all_symbols_result, 'empty'):  # DataFrame인 경우
+                                            if not all_symbols_result.empty:
+                                                all_db_symbols = all_symbols_result['symbol'].tolist()
+                                        elif all_symbols_result:  # tuple list인 경우
+                                            all_db_symbols = [row[0] for row in all_symbols_result]
+                                    
+                                    print(f"[DEBUG] PostgreSQL에서 {len(all_db_symbols)}개 종목 조회")
+                                    
+                                    # PostgreSQL의 모든 종목에 대해 처리 (Redis 무관)
+                                    for symbol in all_db_symbols:
                                         try:
-                                            # PostgreSQL에서 관심종목 실제 데이터 조회
-                                            print(f"[DEBUG] {symbol}: PostgreSQL 쿼리 시작")
+                                            print(f"[DEBUG] {symbol}: PostgreSQL 관심종목 데이터 조회 중...")
+                                            
+                                            # DB 연결 체크
+                                            if not hasattr(db_manager, 'connection') or db_manager.connection is None:
+                                                print(f"[ERROR] {symbol}: DB 연결이 없음, 재연결 시도")
+                                                db_manager = PostgreSQLManager()
+                                            
                                             query = """
                                             SELECT 
-                                                symbol,
-                                                created_date as registered_date,
-                                                trigger_price,
-                                                condition_type,
-                                                condition_value,
-                                                created_at
-                                            FROM daily_watchlist 
-                                            WHERE symbol = %s 
-                                            ORDER BY created_date DESC 
+                                                dw.symbol,
+                                                dw.date as registered_date,
+                                                sd.close AS trigger_price,
+                                                dw.condition_type,
+                                                dw.condition_value,
+                                                dw.market_cap_tier,
+                                                dw.created_at
+                                            FROM daily_watchlist dw 
+                                            LEFT JOIN stock_data sd 
+                                            ON dw.date = sd.date 
+                                            AND dw.symbol = sd.symbol 
+                                            WHERE dw.symbol = %s 
+                                            ORDER BY dw.created_at DESC 
                                             LIMIT 1
                                             """
                                             
                                             db_result = db_manager.execute_query(query, (symbol,))
-                                            print(f"[DEBUG] {symbol}: DB 쿼리 결과 = {db_result}")
                                             
-                                            if db_result and len(db_result) > 0:
-                                                # 실제 DB 데이터 사용
-                                                row = db_result[0]
-                                                registered_date = row[1]  # created_date
-                                                
-                                                # trigger_price 안전하게 변환
-                                                try:
-                                                    db_trigger_price = float(row[2]) if row[2] is not None else None
-                                                    if db_trigger_price and db_trigger_price <= 0:
-                                                        db_trigger_price = None  # 0 이하 값은 무효로 처리
-                                                except (ValueError, TypeError):
-                                                    db_trigger_price = None
-                                                
-                                                condition_type = row[3] if row[3] else 'unknown'
-                                                
-                                                # condition_value 안전하게 변환
-                                                try:
-                                                    condition_value = float(row[4]) if row[4] is not None else None
-                                                except (ValueError, TypeError):
-                                                    condition_value = None
-                                                
-                                                created_at = row[5]
+                                            # DataFrame이든 tuple이든 안전하게 처리
+                                            has_data = False
+                                            if db_result is not None:
+                                                if hasattr(db_result, 'empty'):  # DataFrame인 경우
+                                                    has_data = not db_result.empty
+                                                else:  # tuple list인 경우
+                                                    has_data = bool(db_result)
+                                            
+                                            if has_data:
+                                                # 실제 DB 데이터 처리 (기존 코드와 동일)
+                                                if hasattr(db_result, 'iloc'):  # DataFrame인 경우
+                                                    row = db_result.iloc[0]
+                                                    registered_date = row['registered_date'] if 'registered_date' in row else row[1]
+                                                    db_trigger_price = row['trigger_price'] if 'trigger_price' in row else row[2]
+                                                    condition_type = row['condition_type'] if 'condition_type' in row else row[3]
+                                                    condition_value = row['condition_value'] if 'condition_value' in row else row[4]
+                                                    market_cap_tier = row['market_cap_tier'] if 'market_cap_tier' in row else row[5]
+                                                    created_at = row['created_at'] if 'created_at' in row else row[6]
+                                                else:  # tuple인 경우
+                                                    row = db_result[0]
+                                                    registered_date = row[1]
+                                                    db_trigger_price = row[2]
+                                                    condition_type = row[3]
+                                                    condition_value = row[4]
+                                                    market_cap_tier = row[5]
+                                                    created_at = row[6]
                                                 
                                                 # Redis에서 현재 실시간 가격 조회
                                                 realtime_key = f"realtime:{symbol}"
@@ -952,72 +1008,60 @@ try:
                                                         if price_value is not None:
                                                             current_price = float(price_value)
                                                             if current_price <= 0:
-                                                                current_price = None  # 0 이하 값은 무효로 처리
+                                                                current_price = None
                                                     except (json.JSONDecodeError, ValueError, TypeError):
                                                         current_price = None
                                                 
-                                                # 가격 데이터 안전 처리 (순환 참조 방지)
+                                                # 가격 데이터 안전 처리
                                                 safe_trigger_price = None
                                                 safe_current_price = None
                                                 
-                                                # 1단계: 유효한 trigger_price 설정
+                                                # DB에서 가져온 trigger_price 사용
                                                 if db_trigger_price and db_trigger_price > 0:
                                                     safe_trigger_price = db_trigger_price
-                                                elif current_price and current_price > 0:
-                                                    safe_trigger_price = current_price
                                                 else:
-                                                    safe_trigger_price = 100.0  # 기본값
+                                                    safe_trigger_price = 100.0  # DB에 없을 때만 기본값
                                                 
-                                                # 2단계: 유효한 current_price 설정
+                                                # 유효한 current_price 설정
                                                 if current_price and current_price > 0:
                                                     safe_current_price = current_price
                                                 elif safe_trigger_price and safe_trigger_price > 0:
                                                     safe_current_price = safe_trigger_price
                                                 else:
-                                                    safe_current_price = 100.0  # 기본값
+                                                    safe_current_price = 100.0
                                                 
-                                                # 성과 계산 (완전히 안전한 처리)
+                                                # 성과 계산
                                                 try:
                                                     if safe_trigger_price and safe_current_price and safe_trigger_price > 0:
                                                         price_change_pct = ((safe_current_price - safe_trigger_price) / safe_trigger_price) * 100
                                                     else:
                                                         price_change_pct = 0.0
-                                                        print(f"[DEBUG] {symbol}: 기본값 사용 - trigger={safe_trigger_price}, current={safe_current_price}")
-                                                except (ZeroDivisionError, TypeError, ValueError) as calc_error:
+                                                except (ZeroDivisionError, TypeError, ValueError):
                                                     price_change_pct = 0.0
-                                                    print(f"[ERROR] {symbol}: 계산 오류 - {calc_error}")
-                                                
-                                                # 최종 사용할 가격 값들
-                                                final_trigger_price = safe_trigger_price
-                                                final_current_price = safe_current_price
                                                 
                                                 # 보유일수 계산
                                                 holding_days = 0
                                                 try:
                                                     if isinstance(registered_date, str):
-                                                        # 문자열인 경우 날짜 파싱
                                                         reg_date_obj = datetime.strptime(registered_date[:10], '%Y-%m-%d')
                                                     elif hasattr(registered_date, 'year'):
-                                                        # datetime 객체인 경우
                                                         reg_date_obj = registered_date
                                                     else:
-                                                        # 기타 경우 현재 날짜 사용
                                                         reg_date_obj = datetime.now()
                                                     
                                                     holding_days = max(0, (datetime.now() - reg_date_obj).days)
-                                                except Exception as date_error:
-                                                    print(f"[DEBUG] {symbol}: 날짜 처리 오류 - {date_error}")
+                                                except:
                                                     reg_date_obj = datetime.now()
                                                     holding_days = 0
                                                 
                                                 # 조건 타입 한글 변환
                                                 condition_names = {
-                                                    'bollinger_upper_touch': '볼린저 상단 터치',
-                                                    'bollinger_lower_touch': '볼린저 하단 터치', 
-                                                    'rsi_oversold': 'RSI 과매도 (<30)',
-                                                    'rsi_overbought': 'RSI 과매수 (>70)',
-                                                    'macd_bullish': 'MACD 상승신호',
-                                                    'macd_bearish': 'MACD 하락신호',
+                                                    'bollinger_upper_touch': '볼린저 상단',
+                                                    'bollinger_lower_touch': '볼린저 하단', 
+                                                    'rsi_oversold': 'RSI 과매도',
+                                                    'rsi_overbought': 'RSI 과매수',
+                                                    'macd_bullish': 'MACD 상승',
+                                                    'macd_bearish': 'MACD 하락',
                                                     'volume_spike': '거래량 급증',
                                                     'price_breakout': '가격 돌파',
                                                     'support_bounce': '지지선 반등'
@@ -1026,56 +1070,35 @@ try:
                                                 real_watchlist_sample.append({
                                                     'Symbol': symbol,
                                                     '등록일': reg_date_obj.strftime('%Y-%m-%d'),
-                                                    'Trigger Price': f"${final_trigger_price:.2f}",
-                                                    '현재가': f"${final_current_price:.2f}",
-                                                    '수익률': f"{price_change_pct:+.2f}%",
+                                                    'Trigger Price': f"${safe_trigger_price:.2f}",
+                                                    '현재가': f"${safe_current_price:.2f}" if current_price else "N/A",
+                                                    '수익률': f"{price_change_pct:+.2f}%" if price_change_pct != 0 else "0.00%",
                                                     '보유일수': f"{holding_days}일",
-                                                    '감시조건': condition_names.get(condition_type, condition_type),
+                                                    '감시조건': condition_names.get(condition_type, condition_type or 'N/A'),
                                                     '조건값': f"{condition_value:.1f}" if condition_value else "-",
-                                                    '시장등급': "실제 데이터",
-                                                    '상태': '🟢 수익' if price_change_pct > 0 else '🔴 손실' if price_change_pct < -0.5 else '⚪ 보합',
-                                                    '등록시간': created_at.strftime('%H:%M') if created_at else "N/A",
-                                                    '_price_change_pct': price_change_pct  # 정렬용
-                                                })
-                                            else:
-                                                # DB에 데이터가 없는 경우 Redis 데이터로 대체
-                                                print(f"⚠️ {symbol}: PostgreSQL에 데이터 없음, Redis 데이터 사용")
-                                                
-                                                # Redis 실시간 가격 조회
-                                                realtime_key = f"realtime:{symbol}"
-                                                realtime_data_str = redis_client.redis_client.get(realtime_key)
-                                                current_price = 150.0  # 기본값
-                                                
-                                                if realtime_data_str:
-                                                    try:
-                                                        realtime_data = json.loads(realtime_data_str)
-                                                        price_value = realtime_data.get('price', current_price)
-                                                        if price_value and float(price_value) > 0:
-                                                            current_price = float(price_value)
-                                                    except (json.JSONDecodeError, ValueError, TypeError):
-                                                        pass
-                                                
-                                                # 안전한 가격 보장
-                                                safe_price = max(current_price, 100.0) if current_price else 100.0
-                                                
-                                                real_watchlist_sample.append({
-                                                    'Symbol': symbol,
-                                                    '등록일': datetime.now().strftime('%Y-%m-%d'),
-                                                    'Trigger Price': f"${safe_price:.2f}",
-                                                    '현재가': f"${safe_price:.2f}",
-                                                    '수익률': "0.00%",
-                                                    '보유일수': "0일",
-                                                    '감시조건': "Redis 데이터",
-                                                    '조건값': "-",
-                                                    '시장등급': "Redis Only",
-                                                    '상태': '⚪ 신규',
-                                                    '등록시간': datetime.now().strftime('%H:%M'),
-                                                    '_price_change_pct': 0.0
+                                                    '시장등급': market_cap_tier if market_cap_tier else "미분류",
+                                                    '상태': '🟢 수익' if price_change_pct > 0 else '🔴 손실' if price_change_pct < 0 else '⚪ 보합',
+                                                    '등록시간': registered_date.strftime('%H:%M') if hasattr(registered_date, 'strftime') else str(registered_date)[:16] if registered_date else "N/A",
+                                                    '_price_change_pct': price_change_pct
                                                 })
                                         
                                         except Exception as symbol_error:
-                                            print(f"❌ {symbol} 데이터 처리 오류: {symbol_error}")
-                                            continue
+                                            print(f"❌ {symbol} 처리 오류: {symbol_error}")
+                                            # 에러가 발생해도 기본 데이터 추가
+                                            real_watchlist_sample.append({
+                                                'Symbol': symbol,
+                                                '등록일': datetime.now().strftime('%Y-%m-%d'),
+                                                'Trigger Price': "$N/A",
+                                                '현재가': "$N/A",
+                                                '수익률': "N/A",
+                                                '보유일수': "N/A",
+                                                '감시조건': "오류",
+                                                '조건값': "-",
+                                                '시장등급': "오류",
+                                                '상태': '⚠️ 오류',
+                                                '등록시간': "N/A",
+                                                '_price_change_pct': 0.0
+                                            })
                                     
                                     # 수익률로 정렬
                                     real_watchlist_sample.sort(key=lambda x: x.get('_price_change_pct', 0), reverse=True)
@@ -1186,6 +1209,10 @@ try:
                                             db_manager.close()
                                     except:
                                         pass
+                                        
+                                except Exception as db_error:
+                                    st.error(f"❌ PostgreSQL 연동 오류: {db_error}")
+                                    st.warning("⚠️ 실제 DB 데이터 조회 실패, Redis 데이터만 표시합니다.")
                     else:
                         st.warning("📭 표시할 관심종목 데이터가 없습니다.")
                         
