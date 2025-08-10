@@ -444,6 +444,7 @@ services:
       - ../common:/app/common
       - ../config:/app/config
       - ../data:/data
+      - ../scripts:/app/scripts  # scripts 마운트 추가
     ports:
       - "8501:8501"
     command: streamlit run /app/monitoring_dashboard.py --server.port=8501 --server.address=0.0.0.0
